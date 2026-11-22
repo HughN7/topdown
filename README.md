@@ -42,9 +42,13 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 
 ### Optional: Universal Tree-sitter Engine & Opt-In `CANON-02` Boundaries
 
-If you want one real AST engine across Python, TypeScript/JS, Rust, Swift, and Go—or opt-in cross-file I/O boundary checks—install the optional package (`pip install -e .`):
+If you want one real AST engine across Python, TypeScript/JS, Rust, Swift, and Go—or opt-in cross-file I/O boundary checks—install or run it directly from GitHub (no PyPI release needed):
 
 ```bash
+# Run ephemerally via uvx (zero install) or install with pip
+uvx --from git+https://github.com/HughN7/topdown.git topdown src/
+pip install git+https://github.com/HughN7/topdown.git
+
 topdown src/                          # Single-file AST checks across all 5 languages (zero config)
 topdown --config topdown.toml src/    # Adds opt-in cross-file CANON-02 I/O boundary checks
 ```
@@ -64,7 +68,7 @@ extra_io_imports = ["stripe"]     # optional: project-specific I/O packages
 
 ### Optional: Auto-Check on Every Edit (`PostToolUse` Hook)
 
-Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Gemini CLI so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations):
+Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Antigravity so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations):
 
 ```json
 {

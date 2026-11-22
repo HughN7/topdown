@@ -1,4 +1,4 @@
-"""PostToolUse hook dispatcher for Topdown (Claude Code, Cursor, Gemini CLI).
+"""PostToolUse hook dispatcher for Topdown (Claude Code, Cursor, Antigravity).
 
 Reads hook JSON from stdin, locates the edited file_path, runs the matching single-file
 Topdown checker, and exits 2 with actionable refactor guidance on stderr if violations exist.
