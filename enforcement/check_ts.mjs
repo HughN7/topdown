@@ -60,12 +60,19 @@ async function main() {
   }
   const allViolations = [];
   for (const filePath of collected.files) {
-    const outcome = processTargetFile(filePath, options, tsMod);
-    if (outcome.error) {
-      process.stderr.write(`${outcome.error}\n`);
+    const readResult = readFileText(filePath);
+    if (readResult.error) {
+      process.stderr.write(`${readResult.error}\n`);
       return 2;
     }
-    allViolations.push(...outcome.violations);
+    const source = options.applyFix && tsMod ? applyAstFix(readResult.source, filePath, options.dryRun, tsMod) : readResult.source;
+    const violations =
+      options.applyFix && options.dryRun
+        ? []
+        : tsMod
+          ? checkSourceWithAst(source, filePath, tsMod)
+          : checkSource(source, filePath);
+    allViolations.push(...violations);
   }
   if (!options.dryRun) {
     emitViolations(allViolations, options.asJson);
@@ -73,27 +80,29 @@ async function main() {
   return allViolations.length > 0 ? 1 : 0;
 }
 
-function processTargetFile(filePath, options, tsMod) {
-  let source;
+function readFileText(filePath) {
   try {
-    source = fs.readFileSync(filePath, "utf8");
+    return { source: fs.readFileSync(filePath, "utf8"), error: null };
   } catch (err) {
-    return { violations: [], error: `Error reading ${filePath}: ${err.message}` };
+    return { source: "", error: `Error reading ${filePath}: ${err.message}` };
   }
-  if (options.applyFix && tsMod) {
-    const fixed = fixSourceWithAst(source, filePath, tsMod);
-    if (fixed.refusal) {
-      process.stderr.write(`${filePath}: ${fixed.refusal}\n`);
-    } else if (fixed.source !== source && options.dryRun) {
-      process.stdout.write(`--- a/${filePath}\n+++ b/${filePath}\n${fixed.source}`);
-      return { violations: [], error: null };
-    } else if (fixed.source !== source) {
-      fs.writeFileSync(filePath, fixed.source, "utf8");
-      source = fixed.source;
-    }
+}
+
+function applyAstFix(source, filePath, dryRun, tsMod) {
+  const fixed = fixSourceWithAst(source, filePath, tsMod);
+  if (fixed.refusal) {
+    process.stderr.write(`${filePath}: ${fixed.refusal}\n`);
+    return source;
   }
-  const violations = tsMod ? checkSourceWithAst(source, filePath, tsMod) : checkSource(source, filePath);
-  return { violations, error: null };
+  if (fixed.source === source) {
+    return source;
+  }
+  if (dryRun) {
+    process.stdout.write(`--- a/${filePath}\n+++ b/${filePath}\n${fixed.source}`);
+    return source;
+  }
+  fs.writeFileSync(filePath, fixed.source, "utf8");
+  return fixed.source;
 }
 
 export async function loadTypeScript() {
@@ -485,7 +494,14 @@ function lexSource(source, isJsx = false) {
       consumeTemplateLiteral(source, state);
       continue;
     }
-    if (ch === "/" && canStartRegex(state.lastToken, isJsx)) {
+    if (ch === "}" && state.exprBraceStack.length > 0 && state.exprBraceStack[state.exprBraceStack.length - 1] === 0) {
+      state.exprBraceStack.pop();
+      state.out += ",";
+      consumeTemplateLiteral(source, state);
+      continue;
+    }
+    const canRegex = !(isJsx && state.lastToken === ">") && (REGEX_PRECEDING_CHARS.has(state.lastToken) || REGEX_PRECEDING_KEYWORDS.has(state.lastToken));
+    if (ch === "/" && canRegex) {
       consumeRegexLiteral(source, state);
       continue;
     }
@@ -622,43 +638,21 @@ function consumeRegexLiteral(source, state) {
 function advanceCodeChar(source, state, ch) {
   if (ch === "{" && state.exprBraceStack.length > 0) {
     state.exprBraceStack[state.exprBraceStack.length - 1] += 1;
-  }
-  if (ch === "}" && state.exprBraceStack.length > 0) {
-    const topDepth = state.exprBraceStack[state.exprBraceStack.length - 1];
-    if (topDepth === 0) {
-      state.exprBraceStack.pop();
-      state.out += ",";
-      consumeTemplateLiteral(source, state);
-      return;
-    }
-    state.exprBraceStack[state.exprBraceStack.length - 1] = topDepth - 1;
+  } else if (ch === "}" && state.exprBraceStack.length > 0) {
+    state.exprBraceStack[state.exprBraceStack.length - 1] -= 1;
   }
   if (ch === "\n") {
     state.line += 1;
   }
   if (!/\s/.test(ch)) {
-    state.lastToken = readWordOrPunct(source, state.idx, ch);
+    let start = state.idx;
+    while (/[A-Za-z0-9_$]/.test(ch) && start > 0 && /[A-Za-z0-9_$]/.test(source[start - 1])) {
+      start -= 1;
+    }
+    state.lastToken = /[A-Za-z0-9_$]/.test(ch) ? source.slice(start, state.idx + 1) : ch;
   }
   state.out += ch;
   state.idx += 1;
-}
-
-function readWordOrPunct(source, idx, ch) {
-  if (!/[A-Za-z0-9_$]/.test(ch)) {
-    return ch;
-  }
-  let start = idx;
-  while (start > 0 && /[A-Za-z0-9_$]/.test(source[start - 1])) {
-    start -= 1;
-  }
-  return source.slice(start, idx + 1);
-}
-
-function canStartRegex(lastToken, isJsx = false) {
-  if (isJsx && lastToken === ">") {
-    return false;
-  }
-  return REGEX_PRECEDING_CHARS.has(lastToken) || REGEX_PRECEDING_KEYWORDS.has(lastToken);
 }
 
 function extractFunctions(lines) {
@@ -712,9 +706,9 @@ function measureControlNesting(lines, bodyStartLine, endLine) {
   for (let lineNo = bodyStartLine; lineNo <= endLine; lineNo += 1) {
     const lineText = lines[lineNo - 1];
     const trimmed = lineText.trim();
-    const leadingCloses = countLeadingCloses(trimmed);
-    const opens = countChar(lineText, "{");
-    const closes = countChar(lineText, "}");
+    const leadingCloses = trimmed.length - trimmed.replace(/^\}+/, "").length;
+    const opens = lineText.split("{").length - 1;
+    const closes = lineText.split("}").length - 1;
     braceDepth -= leadingCloses;
     while (controlStack.length > 0 && braceDepth <= controlStack[controlStack.length - 1]) {
       controlStack.pop();
@@ -729,14 +723,6 @@ function measureControlNesting(lines, bodyStartLine, endLine) {
     }
   }
   return maxNesting;
-}
-
-function countLeadingCloses(trimmedLine) {
-  let count = 0;
-  while (count < trimmedLine.length && trimmedLine[count] === "}") {
-    count += 1;
-  }
-  return count;
 }
 
 function findNestedFunctions(lines, bodyStartLine, endLine, filePath) {
@@ -935,9 +921,13 @@ function scanAstFunctionBody(entry, sf, tsMod, filePath) {
     const nextDepth = isControl ? depth + 1 : depth;
     maxNesting = Math.max(maxNesting, nextDepth);
     const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+    const unwrapParen = (expr) => (expr && tsMod.isParenthesizedExpression(expr) ? expr.expression : expr);
     if (tsMod.isFunctionDeclaration(node) && node !== entry.node) {
       violations.push({ path: filePath, line, rule: "CANON-05", message: "Nested function declaration is banned -> lift to module top level." });
-    } else if (tsMod.isConditionalExpression(node) && (isConditionalExpr(node.whenTrue, tsMod) || isConditionalExpr(node.whenFalse, tsMod))) {
+    } else if (
+      tsMod.isConditionalExpression(node) &&
+      (tsMod.isConditionalExpression(unwrapParen(node.whenTrue)) || tsMod.isConditionalExpression(unwrapParen(node.whenFalse)))
+    ) {
       violations.push({ path: filePath, line, rule: "CANON-05", message: "Nested ternary expression is banned -> replace with flat if/return guard clauses." });
     } else if (tsMod.isCatchClause(node) && node.block.statements.length === 0) {
       violations.push({ path: filePath, line, rule: "LLM-02", message: "Empty catch block silently swallows errors -> handle or propagate to L0." });
@@ -958,14 +948,6 @@ function scanAstFunctionBody(entry, sf, tsMod, filePath) {
     });
   }
   return violations;
-}
-
-function isConditionalExpr(node, tsMod) {
-  let current = node;
-  while (tsMod.isParenthesizedExpression(current)) {
-    current = current.expression;
-  }
-  return tsMod.isConditionalExpression(current);
 }
 
 function collectAstCalls(fnNode, nameSet, tsMod) {

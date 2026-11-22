@@ -33,7 +33,7 @@ Topdown stays effective by staying **small, opinionated, and zero-dependency**. 
 ```bash
 python3 -m unittest discover -s tests -p "test_*.py" -v
 node --test tests/test_check_ts.mjs
-python3 enforcement/check_python.py enforcement/check_python.py enforcement/check_rust.py enforcement/run_hook.py examples/verify_examples.py
+python3 enforcement/check_python.py enforcement/check_python.py enforcement/check_rust.py enforcement/run_hook.py examples/verify_examples.py engine/
 node enforcement/check_ts.mjs enforcement/check_ts.mjs
 python3 examples/verify_examples.py
 ```
