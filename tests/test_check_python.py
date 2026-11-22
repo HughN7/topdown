@@ -505,6 +505,29 @@ class TestCheckPython(unittest.TestCase):
             "    is_loading: bool = False\n"
             "    is_error: bool = False\n"
         )
+        branch_locals_and_defaults = (
+            "def run_sync(should_run: bool, loading=False) -> bool:\n"
+            "    if should_run:\n"
+            "        is_error = True\n"
+            "        return is_error\n"
+            "    return loading\n"
+        )
+        nested_classes_separate = (
+            "class Outer:\n"
+            "    def __init__(self) -> None:\n"
+            "        self.is_loading = False\n"
+            "    class Inner:\n"
+            "        def __init__(self) -> None:\n"
+            "            self.is_error = False\n"
+        )
+        class_ignore_does_not_hide_method = (
+            '# topdown-ignore(CANON-03, reason="legacy state class")\n'
+            "class LegacyController:\n"
+            "    is_loading: bool = False\n"
+            "    is_error: bool = False\n"
+            "    def compute(self, a1: int, a2: int, a3: int, a4: int) -> int:\n"
+            "        return a1 + a2 + a3 + a4\n"
+        )
         self.assertIn("CANON-03", [v.rule for v in check_python.check_source(bad_dataclass, "state.py")])
         self.assertIn("CANON-03", [v.rule for v in check_python.check_source(bad_params, "view.py")])
         self.assertEqual(check_python.check_source(suppressed, "wire.py"), [])
@@ -512,6 +535,9 @@ class TestCheckPython(unittest.TestCase):
         self.assertEqual(check_python.check_source(non_bool_counts, "counts.py"), [])
         self.assertEqual(len([v for v in check_python.check_source(init_and_locals, "init.py") if v.rule == "CANON-03"]), 2)
         self.assertEqual(check_python.check_source(stacked_decorator_ignore, "dec.py"), [])
+        self.assertIn("CANON-03", [v.rule for v in check_python.check_source(branch_locals_and_defaults, "br.py")])
+        self.assertEqual(check_python.check_source(nested_classes_separate, "nested.py"), [])
+        self.assertEqual([v.line for v in check_python.check_source(class_ignore_does_not_hide_method, "cls.py")], [5])
 
 
 if __name__ == "__main__":

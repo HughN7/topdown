@@ -28,7 +28,7 @@ const TEST_RUNNER_BRANCH_PATTERN =
 const TEST_PATH_PATTERN =
   /(?:^|[\\/])(?:tests?|__tests__)[\\/]|\.(?:test|spec)\.[a-z]+$/i;
 const LIFECYCLE_BOOL_DECL_PATTERN =
-  /\b((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle|_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle))|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\b(?:\s*\??\s*:\s*boolean\b|\s*=\s*(?:true|false|\$state\s*\(\s*(?:true|false)\s*\)))|\[\s*((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle)|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\s*,[^\]]*\]\s*=\s*(?:React\.)?useState\b/g;
+  /\b((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle|_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle))|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\b(?:\s*\??\s*:\s*boolean\b|\s*=\s*(?:true|false|\$state\s*\(\s*(?:true|false)\s*\)))|\[\s*((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle|_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle))|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\s*,[^\]]*\]\s*=\s*(?:React\.)?useState\b/g;
 const REGEX_PRECEDING_CHARS = new Set(["", "(", "[", "{", ",", ":", ";", "=", "!", "&", "|", "?", "+", "-", "*", "%", "~", "^", ">", "\n"]);
 const REGEX_PRECEDING_KEYWORDS = new Set(["return", "case", "default", "throw", "in", "of", "typeof", "void", "delete", "new", "yield", "await"]);
 
@@ -281,8 +281,14 @@ function checkImplicitStateMachines(lines, filePath, directives) {
     parenDepth = Math.max(0, parenDepth + countChar(lineText, "(") - countChar(lineText, ")"));
     const opens = countChar(lineText, "{");
     const closes = countChar(lineText, "}");
+    const isControl = CONTROL_OPEN_PATTERN.test(lineText);
     for (let k = 0; k < opens; k += 1) {
-      scopeStack.push({ startLine: pendingStart !== -1 ? pendingStart : lineNo, openLine: lineNo, flags: [...pendingFlags] });
+      scopeStack.push({
+        startLine: pendingStart !== -1 ? pendingStart : lineNo,
+        openLine: lineNo,
+        flags: [...pendingFlags],
+        isControl,
+      });
       pendingStart = -1;
       pendingFlags = [];
     }
@@ -294,7 +300,9 @@ function checkImplicitStateMachines(lines, filePath, directives) {
     const popCount = Math.min(closes, scopeStack.length);
     for (let k = 0; k < popCount; k += 1) {
       const popped = scopeStack.pop();
-      closedScopes.push({ ...popped, endLine: lineNo });
+      const targetFlags = popped.isControl && scopeStack.length > 0 ? scopeStack[scopeStack.length - 1].flags : popped.flags;
+      targetFlags.push(...(targetFlags !== popped.flags ? popped.flags : []));
+      closedScopes.push({ ...popped, flags: popped.isControl ? [] : popped.flags });
     }
     if (opens === 0 && closes === 0 && parenDepth === 0 && trimmed.endsWith(";")) {
       pendingStart = -1;
@@ -316,7 +324,7 @@ function checkImplicitStateMachines(lines, filePath, directives) {
 }
 
 function isScopeSuppressed(scope, directives) {
-  for (let lineNo = scope.startLine - 1; lineNo <= scope.endLine; lineNo += 1) {
+  for (let lineNo = scope.startLine - 1; lineNo <= scope.openLine; lineNo += 1) {
     const directive = directives.get(lineNo);
     if (directive && directive.hasReason && (directive.isWildcard || directive.rules.has("CANON-03"))) {
       return true;

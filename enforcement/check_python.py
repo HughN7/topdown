@@ -389,7 +389,7 @@ def filter_suppressed(
         (
             fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno,
             fn_node.lineno,
-            fn_node.end_lineno or fn_node.lineno,
+            fn_node.lineno if isinstance(fn_node, ast.ClassDef) else (fn_node.end_lineno or fn_node.lineno),
         )
         for fn_node in checked_functions
     ]
@@ -474,26 +474,42 @@ def measure_max_nesting(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
 def collect_node_lifecycle_flags(
     scope_node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> list[str]:
+    is_class = isinstance(scope_node, ast.ClassDef)
+    boundary_types = (ast.ClassDef,) if is_class else (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    owned_nodes: list[ast.AST] = []
+    queue: list[ast.AST] = list(scope_node.body)
+    while queue:
+        current = queue.pop()
+        if isinstance(current, boundary_types):
+            continue
+        owned_nodes.append(current)
+        queue.extend(ast.iter_child_nodes(current))
     candidates: list[tuple[str, ast.AST | None, ast.AST | None]] = []
-    if isinstance(scope_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        all_params = scope_node.args.posonlyargs + scope_node.args.args + scope_node.args.kwonlyargs
-        candidates.extend((param.arg, param.annotation, None) for param in all_params)
+    if not is_class:
+        pos_params = scope_node.args.posonlyargs + scope_node.args.args
+        pad_count = len(pos_params) - len(scope_node.args.defaults)
+        pos_defaults = [None] * pad_count + list(scope_node.args.defaults)
+        param_pairs = list(zip(pos_params, pos_defaults)) + list(
+            zip(scope_node.args.kwonlyargs, scope_node.args.kw_defaults)
+        )
+        candidates.extend((param.arg, param.annotation, default) for param, default in param_pairs)
+    target_stmts = scope_node.body if is_class else owned_nodes
     candidates.extend(
         (stmt.target.id, stmt.annotation, stmt.value)
-        for stmt in scope_node.body
+        for stmt in target_stmts
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
     )
     candidates.extend(
         (target.id, None, stmt.value)
-        for stmt in scope_node.body
+        for stmt in target_stmts
         if isinstance(stmt, ast.Assign)
         for target in stmt.targets
         if isinstance(target, ast.Name)
     )
-    if isinstance(scope_node, ast.ClassDef):
+    if is_class:
         candidates.extend(
             (node.target.attr, node.annotation, node.value)
-            for node in ast.walk(scope_node)
+            for node in owned_nodes
             if isinstance(node, ast.AnnAssign)
             and isinstance(node.target, ast.Attribute)
             and isinstance(node.target.value, ast.Name)
@@ -501,7 +517,7 @@ def collect_node_lifecycle_flags(
         )
         candidates.extend(
             (target.attr, None, node.value)
-            for node in ast.walk(scope_node)
+            for node in owned_nodes
             if isinstance(node, ast.Assign)
             for target in node.targets
             if isinstance(target, ast.Attribute)
@@ -512,7 +528,10 @@ def collect_node_lifecycle_flags(
     for name, ann, val in candidates:
         if not LIFECYCLE_BOOL_PATTERN.match(name):
             continue
-        is_bool_ann = ann is not None and isinstance(ann, ast.Name) and ann.id == "bool"
+        is_bool_ann = ann is not None and (
+            (isinstance(ann, ast.Name) and ann.id == "bool")
+            or (isinstance(ann, ast.Constant) and ann.value == "bool")
+        )
         is_bool_val = ann is None and val is not None and isinstance(val, ast.Constant) and isinstance(val.value, bool)
         is_bool_prefix = ann is None and val is None and name.startswith(("is_", "has_", "was_"))
         if is_bool_ann or is_bool_val or is_bool_prefix:

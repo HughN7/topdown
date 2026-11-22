@@ -370,15 +370,29 @@ test("implicit state machine lifecycle boolean soup flags CANON-03 while orthogo
     "}",
   ].join("\n");
   const bareAndHooks = [
-    "export function useRequest() {",
-    "  const [isLoading, setLoading] = useState(false);",
-    "  const [hasError, setHasError] = useState(false);",
-    "  return { isLoading, hasError, setLoading, setHasError };",
+    "export function useRequest(cond: boolean) {",
+    "  const [is_loading, setLoading] = useState(false);",
+    "  if (cond) {",
+    "    const [hasError, setHasError] = useState(false);",
+    "    return { is_loading, hasError, setLoading, setHasError };",
+    "  }",
+    "  return { is_loading, hasError: false, setLoading, setHasError: setLoading };",
+    "}",
+  ].join("\n");
+  const innerIgnoreDoesNotHideOuterClass = [
+    "export class OrderStore {",
+    "  isLoading = false;",
+    "  isError = false;",
+    '  // topdown-ignore(CANON-03, reason="4 args on method only")',
+    "  compute(a: number): number {",
+    "    return a;",
+    "  }",
     "}",
   ].join("\n");
   assert.ok(checkSource(badInterface, "state.ts").some((e) => e.rule === "CANON-03"));
   assert.ok(checkSource(badSvelteStore, "store.svelte.ts").some((e) => e.rule === "CANON-03"));
   assert.ok(checkSource(bareAndHooks, "hook.ts").some((e) => e.rule === "CANON-03"));
+  assert.ok(checkSource(innerIgnoreDoesNotHideOuterClass, "outer.ts").some((e) => e.rule === "CANON-03"));
   assert.deepEqual(checkSource(suppressed, "legacy.ts"), []);
   assert.deepEqual(checkSource(cleanOrthogonal, "merchant.ts"), []);
 });

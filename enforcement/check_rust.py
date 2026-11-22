@@ -144,8 +144,8 @@ def check_implicit_state_machines(
     directives: dict[int, IgnoreDirective],
 ) -> list[Violation]:
     violations: list[Violation] = []
-    scope_stack: list[tuple[int, int, list[str]]] = []
-    closed_scopes: list[tuple[int, int, int, list[str]]] = []
+    scope_stack: list[tuple[int, int, list[str], bool]] = []
+    closed_scopes: list[tuple[int, int, list[str]]] = []
     paren_depth = 0
     pending_start = -1
     pending_flags: list[str] = []
@@ -158,8 +158,9 @@ def check_implicit_state_machines(
         paren_depth = max(0, paren_depth + line_text.count("(") - line_text.count(")"))
         opens = line_text.count("{")
         closes = line_text.count("}")
+        is_control = bool(CONTROL_OPEN_PATTERN.search(line_text))
         for _ in range(opens):
-            scope_stack.append((pending_start if pending_start != -1 else line_no, line_no, list(pending_flags)))
+            scope_stack.append((pending_start if pending_start != -1 else line_no, line_no, list(pending_flags), is_control))
             pending_start = -1
             pending_flags.clear()
         if scope_stack and paren_depth == 0:
@@ -167,18 +168,20 @@ def check_implicit_state_machines(
         else:
             pending_flags.extend(matched)
         for _ in range(min(closes, len(scope_stack))):
-            start_line, open_line, flags = scope_stack.pop()
-            closed_scopes.append((start_line, open_line, line_no, flags))
+            start_line, open_line, flags, ctrl_flag = scope_stack.pop()
+            target_flags = scope_stack[-1][2] if (ctrl_flag and scope_stack) else flags
+            target_flags.extend(flags if target_flags is not flags else [])
+            closed_scopes.append((start_line, open_line, [] if ctrl_flag else flags))
         if opens == 0 and closes == 0 and paren_depth == 0 and trimmed.endswith(";"):
             pending_start = -1
             pending_flags.clear()
-    for start_line, open_line, end_line, flags in closed_scopes:
+    for start_line, open_line, flags in closed_scopes:
         unique_flags = list(dict.fromkeys(flags))
         is_ignored = any(
             (directive := directives.get(check_line)) is not None
             and directive.has_reason
             and (directive.is_wildcard or "CANON-03" in directive.rules)
-            for check_line in range(start_line - 1, end_line + 1)
+            for check_line in range(start_line - 1, open_line + 1)
         )
         if len(unique_flags) >= 2 and not is_ignored:
             violations.append(

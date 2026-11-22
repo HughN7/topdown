@@ -292,6 +292,17 @@ class TestCheckRust(unittest.TestCase):
         self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(bad_struct, "view.rs")])
         self.assertEqual(check_rust.check_source(suppressed, "ffi.rs"), [])
         self.assertEqual(check_rust.check_source(separate_clean, "clean.rs"), [])
+        branch_fn = (
+            "pub fn run_sync(cond: bool) -> bool {\n"
+            "    let is_loading = true;\n"
+            "    if cond {\n"
+            "        let is_error = true;\n"
+            "        return is_error;\n"
+            "    }\n"
+            "    is_loading\n"
+            "}\n"
+        )
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(branch_fn, "branch.rs")])
 
 
 if __name__ == "__main__":
