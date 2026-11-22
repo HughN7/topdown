@@ -30,4 +30,4 @@ Lightweight zero-dependency heuristic complement to Clippy (Python 3.12+ stdlib)
 python3 enforcement/check_rust.py src/
 ```
 
-Ignores `#[cfg(test)]` modules; reliably checks `CANON-01` (80-line cap), `CANON-05` (nesting depth, nested `fn`), `LLM-02` (`.unwrap()` / `.unwrap_or_default()`), and `CANON-08` (`topdown-ignore` reason). Pair with Clippy for full compiler-level checks.
+Ignores top-level `#[cfg(test)]` modules; checks `CANON-01` (80-line cap), `CANON-05` (nesting depth, nested `fn`), `LLM-02` (`.unwrap()` / `.unwrap_or_default()`), `LLM-07` (inline `#[cfg(test)]`), and `CANON-08` (`topdown-ignore` reason). For full AST call-order/depth checks, use the optional `engine/` (`topdown src/`). Pair with Clippy for compiler-level checks.

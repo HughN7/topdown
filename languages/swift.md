@@ -41,4 +41,4 @@ force_cast: error
 
 ## 3. Structural Checker
 
-Linter-only in v0.1 — enforce with `swiftlint --strict`, `swift-format`, and [`enforcement/ci_escape_hatch.yml`](../enforcement/ci_escape_hatch.yml).
+Pair `swiftlint --strict`, `swift-format`, and [`enforcement/ci_escape_hatch.yml`](../enforcement/ci_escape_hatch.yml). For full AST checks (`CANON-01` order/depth/lines, `CANON-05` nesting, `LLM-05`, `CANON-08`), run the optional universal tree-sitter engine (`topdown src/`).

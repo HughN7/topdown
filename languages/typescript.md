@@ -22,7 +22,8 @@
     "max-depth": ["error", 2],
     "complexity": ["error", 10],
     "max-params": ["error", 3],
-    "no-nested-ternary": "error"
+    "no-nested-ternary": "error",
+    "no-unused-vars": ["error", { "argsIgnorePattern": "^_" }]
   }
 }
 ```
@@ -31,7 +32,8 @@
 ```js
 export default [{ rules: {
   "max-lines-per-function": ["error", { max: 80, skipBlankLines: false, skipComments: false }],
-  "max-depth": ["error", 2], "complexity": ["error", 10], "max-params": ["error", 3], "no-nested-ternary": "error",
+  "max-depth": ["error", 2], "complexity": ["error", 10], "max-params": ["error", 3],
+  "no-nested-ternary": "error", "no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
 }}];
 ```
 
