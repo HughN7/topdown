@@ -233,7 +233,26 @@ class TestCheckRust(unittest.TestCase):
             "    0\n"
             "}\n"
         )
+        let_if_deep = (
+            "pub fn pick(a: bool, b: bool, c: bool) -> i32 {\n"
+            "    let chosen = if a {\n"
+            "        if b {\n"
+            "            1\n"
+            "        } else {\n"
+            "            if c {\n"
+            "                2\n"
+            "            } else {\n"
+            "                3\n"
+            "            }\n"
+            "        }\n"
+            "    } else {\n"
+            "        4\n"
+            "    };\n"
+            "    chosen\n"
+            "}\n"
+        )
         self.assertEqual(check_rust.check_source(clean, "ok.rs"), [])
+        self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(let_if_deep, "deep.rs")])
 
 
 if __name__ == "__main__":

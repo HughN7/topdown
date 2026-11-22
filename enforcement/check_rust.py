@@ -303,7 +303,7 @@ def mask_cfg_test_lines(lines: list[str]) -> list[str]:
     for line_text in lines:
         opens = line_text.count("{")
         closes = line_text.count("}")
-        has_cfg_test = file_brace_depth == 0 and bool(CFG_TEST_PATTERN.search(line_text))
+        has_cfg_test = not in_test_block and file_brace_depth == 0 and bool(CFG_TEST_PATTERN.search(line_text))
         if has_cfg_test and opens > 0:
             test_brace_depth = opens - closes
             in_test_block = test_brace_depth > 0
@@ -367,28 +367,34 @@ def measure_control_nesting(lines: list[str], body_start_line: int, end_line: in
     control_stack: list[int] = []
     brace_depth = 0
     max_nesting = 0
-    in_let_stmt = False
+    let_depth: int | None = None
     for line_no in range(body_start_line, end_line + 1):
         line_text = lines[line_no - 1]
         trimmed = line_text.strip()
         leading_closes = len(trimmed) - len(trimmed.lstrip("}"))
-        if re.search(r"^\s*let\b", line_text):
-            in_let_stmt = True
-        is_let_else = in_let_stmt and bool(re.search(r"\belse\s*\{", line_text))
-        is_match_guard = "=>" in line_text
         opens = line_text.count("{")
         closes = line_text.count("}")
         brace_depth -= leading_closes
+        if re.search(r"^\s*let\b", line_text) and not re.search(r"\bif\b", line_text):
+            let_depth = brace_depth
+        is_let_else = (
+            let_depth is not None
+            and brace_depth == let_depth
+            and not trimmed.startswith("}")
+            and bool(re.search(r"\belse\s*\{", line_text))
+        )
+        is_match_guard = "=>" in line_text
         while control_stack and brace_depth <= control_stack[-1]:
             control_stack.pop()
         if line_no > body_start_line and not is_let_else and not is_match_guard and CONTROL_OPEN_PATTERN.search(line_text):
             control_stack.append(brace_depth)
             max_nesting = max(max_nesting, len(control_stack))
+            let_depth = None
         brace_depth += opens - (closes - leading_closes)
         while control_stack and brace_depth <= control_stack[-1]:
             control_stack.pop()
-        if ";" in line_text:
-            in_let_stmt = False
+        if ";" in line_text or is_let_else:
+            let_depth = None
     return max_nesting
 
 

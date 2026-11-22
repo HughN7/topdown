@@ -315,7 +315,17 @@ test("JSX apostrophes, destructured signatures, and quoted optional keys handled
     "}",
   ].join("\n");
   const quotedOptionalKeys = 'type Headers = { "x-a"?: string; "x-b"?: string };\n';
+  const siblingTernaries = [
+    "export function render(x: boolean, y: boolean) {",
+    "  const tpl = `${x ? 1 : 2}-${y ? 3 : 4}`;",
+    "  const jsx = <div>{x ? 1 : 2}{y ? 3 : 4}</div>;",
+    "  const eq = (x ? 1 : 2) === (y ? 3 : 4);",
+    "  const curried = ((a: number) => (b: number) => a + b)(x ? 1 : 2)(y ? 3 : 4);",
+    "  return { tpl, jsx, eq, curried };",
+    "}",
+  ].join("\n");
   assert.ok(checkSource(jsxWithViolation, "Card.tsx").some((e) => e.rule === "CANON-05"));
   assert.ok(checkSource(destructuredDeep, "run.ts").some((e) => e.rule === "CANON-05"));
   assert.deepEqual(checkSource(quotedOptionalKeys, "types.ts"), []);
+  assert.deepEqual(checkSource(siblingTernaries, "siblings.tsx"), []);
 });

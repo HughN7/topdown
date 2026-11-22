@@ -553,6 +553,7 @@ function advanceCodeChar(source, state, ch) {
     const topDepth = state.exprBraceStack[state.exprBraceStack.length - 1];
     if (topDepth === 0) {
       state.exprBraceStack.pop();
+      state.out += ",";
       consumeTemplateLiteral(source, state);
       return;
     }
@@ -704,7 +705,22 @@ function hasNestedTernary(lineText) {
     .replace(/\?\?/g, "")
     .replace(/[\w}\]]\?\s*:/g, "")
     .replace(/\w\?\s*(?=[,)\]])/g, "");
-  return sanitized.split(/[,+]|}\s*\(/).some((segment) => countChar(segment, "?") >= 2);
+  const scopes = [{ active: false, childHad: false }];
+  for (const ch of sanitized) {
+    if (ch === "(" || ch === "{" || ch === "[") {
+      scopes.push({ active: false, childHad: false });
+    } else if ((ch === ")" || ch === "}" || ch === "]") && scopes.length > 1) {
+      const closed = scopes.pop();
+      scopes[scopes.length - 1].childHad ||= closed.active || closed.childHad;
+    } else if (ch === "," || ch === ";") {
+      scopes[scopes.length - 1] = { active: false, childHad: false };
+    } else if (ch === "?" && (scopes.some((s) => s.active) || scopes[scopes.length - 1].childHad)) {
+      return true;
+    } else if (ch === "?") {
+      scopes[scopes.length - 1].active = true;
+    }
+  }
+  return false;
 }
 
 function countChar(text, target) {

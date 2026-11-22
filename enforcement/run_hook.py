@@ -81,7 +81,12 @@ def build_checker_command(target_path: Path) -> tuple[str, ...]:
         if node_bin is None:
             return ()
         return (node_bin, str(ENFORCEMENT_DIR / "check_ts.mjs"), str(target_path))
-    has_engine = (REPO_ROOT / "engine" / "cli.py").is_file() or importlib.util.find_spec("engine.cli") is not None
+    engine_spec = importlib.util.find_spec("engine")
+    has_engine = (REPO_ROOT / "engine" / "cli.py").is_file() or (
+        engine_spec is not None
+        and engine_spec.submodule_search_locations is not None
+        and importlib.util.find_spec("engine.cli") is not None
+    )
     if suffix in ENGINE_EXTENSIONS and has_engine and importlib.util.find_spec("tree_sitter_language_pack") is not None:
         return (sys.executable, "-m", "engine.cli", str(target_path))
     return ()
