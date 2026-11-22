@@ -208,6 +208,46 @@ class TestUniversalEngine(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
             self.assertEqual(json.loads(proc.stdout), [])
 
+    def test_swift_guard_else_if_and_rust_grouped_use_boundaries(self) -> None:
+        from engine.analyzer import analyze_source
+        from engine.boundaries import BoundaryConfig, check_file_boundaries
+
+        swift_flat = (
+            "func classify(value: Int, active: Bool) -> String {\n"
+            "    guard active else { return \"off\" }\n"
+            "    if value > 100 {\n"
+            "        return \"high\"\n"
+            "    } else if value > 50 {\n"
+            "        return \"mid\"\n"
+            "    } else if value > 10 {\n"
+            "        return \"low\"\n"
+            "    }\n"
+            "    return \"zero\"\n"
+            "}\n"
+        )
+        self.assertEqual(analyze_source(swift_flat, "classify.swift"), [])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            rust_file = root / "src" / "domain" / "calc.rs"
+            rust_file.parent.mkdir(parents=True)
+            rust_source = (
+                "use std::{fs, net::TcpStream};\n"
+                "use crate::adapters::db;\n"
+                "use capital::metrics;\n"
+            )
+            rust_file.write_text(rust_source, encoding="utf-8")
+            cfg = BoundaryConfig(
+                root_dir=root,
+                pure_dirs=("src/domain",),
+                shell_dirs=("src/adapters", "api"),
+                extra_io_imports=(),
+                use_default_io_imports=True,
+            )
+            violations = check_file_boundaries(rust_source, rust_file, cfg)
+            self.assertEqual(len(violations), 3)
+            self.assertFalse(any("capital" in entry.message for entry in violations))
+
 
 if __name__ == "__main__":
     unittest.main()

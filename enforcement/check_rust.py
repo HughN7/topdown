@@ -24,6 +24,9 @@ CONTROL_OPEN_PATTERN = re.compile(r"\b(?:if|for|while|loop|match)\b[^{]*\{|\bels
 UNWRAP_PATTERN = re.compile(r"\.(?:unwrap|unwrap_or_default)\s*\(")
 CFG_TEST_PATTERN = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
 TEST_PATH_PATTERN = re.compile(r"(?:^|[\\/])tests[\\/]|_test\.rs$", re.IGNORECASE)
+SKIP_DIRS = frozenset({".git", "target", ".venv", "node_modules"})
+CHAR_LITERAL_PATTERN = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\])'")
+RAW_STRING_START_PATTERN = re.compile(r'(?:[bc])?r(#*)"')
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,7 @@ class IgnoreDirective:
     line: int
     rules: frozenset[str]
     has_reason: bool
+    is_wildcard: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,7 +189,11 @@ def collect_rust_files(raw_paths: tuple[str, ...]) -> tuple[list[Path], str | No
         if not target.exists():
             return [], f"Path not found: {raw_entry}"
         if target.is_dir():
-            collected.extend(sorted(target.rglob("*.rs")))
+            collected.extend(
+                path
+                for path in sorted(target.rglob("*.rs"))
+                if not any(part in SKIP_DIRS for part in path.relative_to(target).parts)
+            )
         else:
             collected.append(target)
     return collected, None
@@ -212,7 +220,10 @@ def parse_ignore_directives(
         inner = match.group(1) or ""
         rules = frozenset(RULE_ID_PATTERN.findall(inner))
         has_reason = REASON_PATTERN.search(inner) is not None
-        directives[line_no] = IgnoreDirective(line=line_no, rules=rules, has_reason=has_reason)
+        is_wildcard = not REASON_PATTERN.sub("", inner).strip(" ,")
+        directives[line_no] = IgnoreDirective(
+            line=line_no, rules=rules, has_reason=has_reason, is_wildcard=is_wildcard
+        )
         if not has_reason:
             violations.append(
                 Violation(file_path, line_no, "CANON-08", 'topdown-ignore requires a non-empty reason="...".')
@@ -235,22 +246,21 @@ def lex_rust_source(source: str) -> tuple[str, list[tuple[int, str]]]:
             comments.append((line_no, source[idx:end_idx]))
             idx = end_idx
         elif ch == "/" and nxt == "*":
-            end_idx = source.find("*/", idx + 2)
-            end_idx = length if end_idx == -1 else end_idx + 2
+            end_idx = find_nested_block_comment_end(source, idx + 2)
             newlines = source[idx:end_idx].count("\n")
             chars.append("\n" * newlines)
             line_no += newlines
             idx = end_idx
-        elif ch == "r" and (nxt == '"' or nxt == "#") and (idx == 0 or not source[idx - 1].isalnum()) and (raw_match := re.match(r'r(#*)"', source[idx:])):
-            end_idx = source.find('"' + raw_match.group(1), idx + raw_match.end())
+        elif (idx == 0 or not source[idx - 1].isalnum()) and (raw_match := RAW_STRING_START_PATTERN.match(source, idx)):
+            end_idx = source.find('"' + raw_match.group(1), raw_match.end())
             step_end = length if end_idx == -1 else end_idx + 1 + len(raw_match.group(1))
             newlines = source[idx:step_end].count("\n")
             chars.append(" " + ("\n" * newlines))
             line_no += newlines
             idx = step_end
-        elif ch == "'" and idx + 2 < length and (source[idx + 2] == "'" or (nxt == "\\" and idx + 3 < length and source[idx + 3] == "'")):
+        elif ch == "'" and (char_match := CHAR_LITERAL_PATTERN.match(source, idx)):
             chars.append(" ")
-            idx += 4 if nxt == "\\" else 3
+            idx = char_match.end()
         elif ch == '"':
             str_match = re.match(r'"(?:\\.|[^"\\])*"', source[idx:], re.DOTALL)
             step_end = idx + str_match.end() if str_match else length
@@ -263,6 +273,23 @@ def lex_rust_source(source: str) -> tuple[str, list[tuple[int, str]]]:
             chars.append(ch)
             idx += 1
     return "".join(chars), comments
+
+
+def find_nested_block_comment_end(source: str, start_idx: int) -> int:
+    depth = 1
+    probe = start_idx
+    length = len(source)
+    while probe < length and depth > 0:
+        pair = source[probe : probe + 2]
+        if pair == "/*":
+            depth += 1
+            probe += 2
+        elif pair == "*/":
+            depth -= 1
+            probe += 2
+        else:
+            probe += 1
+    return probe
 
 
 def mask_cfg_test_lines(lines: list[str]) -> list[str]:
@@ -340,13 +367,13 @@ def measure_control_nesting(lines: list[str], body_start_line: int, end_line: in
         line_text = lines[line_no - 1]
         trimmed = line_text.strip()
         leading_closes = len(trimmed) - len(trimmed.lstrip("}"))
-        is_else_if = bool(re.search(r"\belse\s+if\b", line_text))
+        is_let_else = bool(re.search(r"\blet\b.*\belse\s*\{", line_text))
         opens = line_text.count("{")
         closes = line_text.count("}")
         brace_depth -= leading_closes
         while control_stack and brace_depth <= control_stack[-1]:
             control_stack.pop()
-        if line_no > body_start_line and not is_else_if and CONTROL_OPEN_PATTERN.search(line_text):
+        if line_no > body_start_line and not is_let_else and CONTROL_OPEN_PATTERN.search(line_text):
             control_stack.append(brace_depth)
             max_nesting = max(max_nesting, len(control_stack))
         brace_depth += opens - (closes - leading_closes)
@@ -372,7 +399,7 @@ def filter_suppressed(
         is_suppressed = any(
             (directive := directives.get(check_line)) is not None
             and directive.has_reason
-            and (not directive.rules or entry.rule in directive.rules)
+            and (directive.is_wildcard or entry.rule in directive.rules)
             for check_line in candidate_lines
         )
         if not is_suppressed:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "topdown-arch"
-version = "0.4.0"
+version = "0.4.1"
 description = "Universal tree-sitter AST engine and opt-in boundary checker for Topdown"
 readme = "README.md"
 license = { file = "LICENSE" }

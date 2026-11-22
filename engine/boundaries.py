@@ -13,10 +13,15 @@ from pathlib import Path
 
 from tree_sitter_language_pack import get_parser
 
-from engine.analyzer import Violation
+from engine.analyzer import Violation, extract_ignore_directives
 from engine.specs import LanguageSpec, spec_for_path
 
-IMPORT_TOKEN_PATTERN = re.compile(r"""["']([^"']+)["']|\b(?:import|from|use)\s+([A-Za-z0-9_.:/]+)""")
+QUOTED_IMPORT_PATTERN = re.compile(r"""["']([^"']+)["']""")
+PY_FROM_PATTERN = re.compile(r"\bfrom\s+([A-Za-z0-9_.]+)\s+import\b")
+PY_IMPORT_PATTERN = re.compile(r"\bimport\s+(.+)")
+RUST_GROUP_PATTERN = re.compile(r"\buse\s+([A-Za-z0-9_:]+)::\{([^}]+)\}")
+RUST_SINGLE_PATTERN = re.compile(r"\buse\s+([A-Za-z0-9_:]+)")
+SWIFT_IMPORT_PATTERN = re.compile(r"\bimport\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?([A-Za-z0-9_.]+)")
 
 
 @dataclass(frozen=True)
@@ -30,8 +35,8 @@ class BoundaryConfig:
 
 
 def load_boundary_config(root_dir: Path, explicit_config: Path | None) -> tuple[BoundaryConfig | None, str | None]:
-    config_path = explicit_config if explicit_config is not None else root_dir / "topdown.toml"
-    if not config_path.is_file():
+    config_path = explicit_config if explicit_config is not None else find_ancestor_config(root_dir)
+    if config_path is None or not config_path.is_file():
         if explicit_config is not None:
             return None, f"Config file not found: {explicit_config}"
         return None, None
@@ -55,11 +60,23 @@ def check_file_boundaries(source: str, file_path: Path, config: BoundaryConfig) 
     spec = spec_for_path(file_path)
     if spec is None or not config.pure_dirs or not is_inside_dirs(file_path, config.root_dir, config.pure_dirs):
         return []
-    imports = extract_imports(source, spec)
+    parser = get_parser(spec.name)
+    source_bytes = source.encode("utf-8")
+    tree = parser.parse(source_bytes)
+    directives, _ = extract_ignore_directives(tree.root_node, source_bytes, spec=spec, file_path=str(file_path))
+    imports = extract_imports(tree.root_node, source_bytes, spec)
     banned_io = (spec.default_io_imports if config.use_default_io_imports else ()) + config.extra_io_imports
-    shell_stems = tuple(dir_path.replace("/", ".") for dir_path in config.shell_dirs)
+    shell_segments = tuple(tuple(dir_path.split("/")) for dir_path in config.shell_dirs)
     violations: list[Violation] = []
     for line_no, target in imports:
+        is_ignored = any(
+            (directive := directives.get(check_line)) is not None
+            and directive.has_reason
+            and (directive.is_wildcard or "CANON-02" in directive.rules)
+            for check_line in (line_no, line_no - 1)
+        )
+        if is_ignored:
+            continue
         if matches_io_import(target, banned_io):
             violations.append(
                 Violation(
@@ -69,7 +86,7 @@ def check_file_boundaries(source: str, file_path: Path, config: BoundaryConfig) 
                     f"Pure-core file imports I/O module '{target}' -> move I/O to an L0 orchestrator or adapter and pass values in.",
                 )
             )
-        elif matches_shell_import(target, config.shell_dirs, shell_stems):
+        elif matches_shell_import(target, shell_segments):
             violations.append(
                 Violation(
                     str(file_path),
@@ -81,12 +98,18 @@ def check_file_boundaries(source: str, file_path: Path, config: BoundaryConfig) 
     return violations
 
 
-def extract_imports(source: str, spec: LanguageSpec) -> list[tuple[int, str]]:
-    parser = get_parser(spec.name)
-    source_bytes = source.encode("utf-8")
-    tree = parser.parse(source_bytes)
+def find_ancestor_config(start_dir: Path) -> Path | None:
+    current = start_dir.resolve()
+    for folder in (current, *current.parents):
+        candidate = folder / "topdown.toml"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def extract_imports(root_node: object, source_bytes: bytes, spec: LanguageSpec) -> list[tuple[int, str]]:
     found: list[tuple[int, str]] = []
-    stack = [tree.root_node]
+    stack = [root_node]
     while stack:
         node = stack.pop()
         if node.type not in spec.import_nodes:
@@ -94,13 +117,30 @@ def extract_imports(source: str, spec: LanguageSpec) -> list[tuple[int, str]]:
             continue
         text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
         line_no = node.start_point[0] + 1
-        tokens = [
-            match.group(1) or match.group(2)
-            for match in IMPORT_TOKEN_PATTERN.finditer(text)
-            if match.group(1) or match.group(2)
-        ]
-        found.extend((line_no, token) for token in tokens)
+        found.extend((line_no, token) for token in parse_import_targets(text, spec.name))
     return sorted(found, key=lambda pair: pair[0])
+
+
+def parse_import_targets(text: str, lang_name: str) -> list[str]:
+    if lang_name == "python":
+        from_match = PY_FROM_PATTERN.search(text)
+        if from_match:
+            return [from_match.group(1)]
+        imp_match = PY_IMPORT_PATTERN.search(text)
+        if not imp_match:
+            return []
+        return [part.strip().split()[0] for part in imp_match.group(1).split(",") if part.strip()]
+    if lang_name == "rust":
+        group_match = RUST_GROUP_PATTERN.search(text)
+        if group_match:
+            prefix = group_match.group(1)
+            return [f"{prefix}::{entry.strip().split()[0]}" for entry in group_match.group(2).split(",") if entry.strip()]
+        single = RUST_SINGLE_PATTERN.search(text)
+        return [single.group(1)] if single else []
+    if lang_name == "swift":
+        match = SWIFT_IMPORT_PATTERN.search(text)
+        return [match.group(1)] if match else []
+    return QUOTED_IMPORT_PATTERN.findall(text)
 
 
 def normalize_rel_dir(raw_dir: str) -> str:
@@ -125,9 +165,22 @@ def matches_io_import(import_target: str, banned_io: tuple[str, ...]) -> bool:
     )
 
 
-def matches_shell_import(import_target: str, shell_dirs: tuple[str, ...], shell_stems: tuple[str, ...]) -> bool:
-    normalized = import_target.replace("\\", "/")
-    return any(
-        shell_dir in normalized or normalized == stem or normalized.startswith(f"{stem}.")
-        for shell_dir, stem in zip(shell_dirs, shell_stems)
+def matches_shell_import(import_target: str, shell_segments: tuple[tuple[str, ...], ...]) -> bool:
+    target_segments = tuple(
+        seg for seg in re.split(r"[/.:\\]+", import_target) if seg and seg != "crate" and seg != "self" and seg != "super"
     )
+    if not target_segments:
+        return False
+    for shell_segs in shell_segments:
+        if contains_segment_run(target_segments, shell_segs):
+            return True
+        if len(shell_segs) > 1 and shell_segs[0] in {"src", "lib", "app"} and contains_segment_run(target_segments, shell_segs[1:]):
+            return True
+    return False
+
+
+def contains_segment_run(haystack: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+    span = len(needle)
+    if span == 0 or span > len(haystack):
+        return False
+    return any(haystack[idx : idx + span] == needle for idx in range(len(haystack) - span + 1))

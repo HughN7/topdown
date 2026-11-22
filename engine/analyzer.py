@@ -33,6 +33,7 @@ class IgnoreDirective:
     line: int
     rules: frozenset[str]
     has_reason: bool
+    is_wildcard: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,11 +55,13 @@ def analyze_source(source: str, file_path: str) -> list[Violation]:
         tree.root_node, source_bytes, spec=spec, file_path=file_path
     )
     top_functions = collect_top_functions(tree.root_node, source_bytes, spec)
+    member_functions = collect_member_functions(tree.root_node, source_bytes, spec)
+    all_functions = top_functions + member_functions
     raw_violations = (
         check_order_and_depth(top_functions, source_bytes, spec=spec, file_path=file_path)
-        + check_function_rules(top_functions, spec, file_path)
+        + check_function_rules(all_functions, spec, file_path)
     )
-    kept = filter_suppressed(raw_violations, top_functions, directives)
+    kept = filter_suppressed(raw_violations, all_functions, directives)
     return sorted(ignore_violations + kept, key=lambda entry: (entry.line, entry.rule))
 
 
@@ -169,6 +172,29 @@ def collect_top_functions(root_node: Any, source_bytes: bytes, spec: LanguageSpe
     return entries
 
 
+def collect_member_functions(root_node: Any, source_bytes: bytes, spec: LanguageSpec) -> list[FunctionEntry]:
+    if not spec.container_nodes:
+        return []
+    entries: list[FunctionEntry] = []
+    stack = [child for child in root_node.named_children if child.type in spec.container_nodes or child.type in spec.wrapper_nodes]
+    while stack:
+        node = stack.pop()
+        children = node.named_children
+        stack.extend(
+            child
+            for child in children
+            if unwrap_function_node(child, spec) is None
+            and (child.type in spec.container_nodes or child.type in spec.wrapper_nodes)
+        )
+        entries.extend(
+            FunctionEntry(name, target, target.start_point[0] + 1, target.end_point[0] + 1)
+            for child in children
+            if (target := unwrap_function_node(child, spec)) is not None
+            and (name := extract_node_name(target, source_bytes)) is not None
+        )
+    return entries
+
+
 def unwrap_function_node(node: Any, spec: LanguageSpec) -> Any | None:
     if node.type in spec.function_nodes:
         return node
@@ -213,7 +239,10 @@ def extract_ignore_directives(
         inner = match.group(1) or ""
         rules = frozenset(RULE_ID_PATTERN.findall(inner))
         has_reason = REASON_PATTERN.search(inner) is not None
-        directives[line_no] = IgnoreDirective(line=line_no, rules=rules, has_reason=has_reason)
+        is_wildcard = not REASON_PATTERN.sub("", inner).strip(" ,")
+        directives[line_no] = IgnoreDirective(
+            line=line_no, rules=rules, has_reason=has_reason, is_wildcard=is_wildcard
+        )
         if not has_reason:
             violations.append(
                 Violation(file_path, line_no, "CANON-08", 'topdown-ignore requires a non-empty reason="...".')
@@ -273,7 +302,11 @@ def inspect_function_body(fn_node: Any, spec: LanguageSpec) -> tuple[int, list[i
         if node.type in spec.function_nodes:
             nested_lines.append(node.start_point[0] + 1)
             continue
-        is_else_if = node.type in spec.control_nodes and node.parent is not None and node.parent.type in {"else_clause", "elif_clause"}
+        is_else_if = (
+            node.type in spec.control_nodes
+            and node.parent is not None
+            and node.parent.type in {"else_clause", "elif_clause", "if_statement"}
+        )
         adds_depth = node.type in spec.control_nodes and not is_else_if
         next_depth = depth + 1 if adds_depth else depth
         max_depth = max(max_depth, next_depth)
@@ -298,7 +331,7 @@ def filter_suppressed(
         is_suppressed = any(
             (directive := directives.get(check_line)) is not None
             and directive.has_reason
-            and (not directive.rules or entry.rule in directive.rules)
+            and (directive.is_wildcard or entry.rule in directive.rules)
             for check_line in candidate_lines
         )
         if not is_suppressed:

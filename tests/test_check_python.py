@@ -312,6 +312,34 @@ class TestCheckPython(unittest.TestCase):
             self.assertIsNotNone(refusal)
             self.assertEqual(fixed_source, sample)
 
+    def test_fix_preserves_shebang_and_separates_trailing_main_guard(self) -> None:
+        import check_python
+
+        sample = (
+            "#!/usr/bin/env python3\n"
+            "def leaf(count: int) -> int:\n"
+            "    return count + 1\n\n"
+            "def orchestrate(count: int) -> int:\n"
+            "    return leaf(count)\n"
+            'if __name__ == "__main__":\n'
+            "    orchestrate(1)\n"
+        )
+        fixed_source, refusal = check_python.fix_source(sample)
+        self.assertIsNone(refusal)
+        self.assertTrue(fixed_source.startswith("#!/usr/bin/env python3\n"))
+        self.assertNotIn("1if", fixed_source)
+        self.assertEqual(check_python.check_source(fixed_source, "ok.py"), [])
+
+    def test_unknown_ignore_rule_id_does_not_act_as_wildcard(self) -> None:
+        import check_python
+
+        typo_ignore = (
+            '# topdown-ignore(CANON-9, reason="typo rule id")\n'
+            "def process(data: int) -> int:\n"
+            "    return data\n"
+        )
+        self.assertIn("LLM-03", [v.rule for v in check_python.check_source(typo_ignore, "t.py")])
+
     def test_topdown_ignore_suppresses_with_reason_and_flags_without(self) -> None:
         import check_python
 

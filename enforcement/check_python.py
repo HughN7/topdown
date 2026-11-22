@@ -23,9 +23,11 @@ GAMING_NAME_PATTERN = re.compile(r"(?:_part\d+|_helper\d*)$", re.IGNORECASE)
 TEST_ENV_MARKERS = frozenset({"PYTEST_CURRENT_TEST", "UNITTEST_RUNNING"})
 TEST_MODULE_MARKERS = frozenset({"pytest", "unittest"})
 TEST_PATH_PATTERN = re.compile(r"(?:^|[\\/])(?:tests?|__tests__)[\\/]|(?:^|[\\/])test_[^\\/]+$|_test\.py$", re.IGNORECASE)
+SKIP_DIRS = frozenset({".git", ".venv", "venv", "__pycache__", "build", "dist", "node_modules"})
 IGNORE_PATTERN = re.compile(r"#\s*topdown-ignore(?:\((.*)\))?")
 REASON_PATTERN = re.compile(r"""reason\s*=\s*(?:"([^"]+)"|'([^']+)')""")
 RULE_ID_PATTERN = re.compile(r"\b(?:CANON|LLM)-\d{2}\b")
+HEADER_COMMENT_PATTERN = re.compile(r"^#(?:!|\s*-\*-|\s*coding[:=])")
 CONTROL_NODES = (
     ast.If,
     ast.For,
@@ -52,6 +54,7 @@ class IgnoreDirective:
     line: int
     rules: frozenset[str]
     has_reason: bool
+    is_wildcard: bool = False
 
 
 @dataclass(frozen=True)
@@ -300,7 +303,11 @@ def collect_python_files(raw_paths: tuple[str, ...]) -> tuple[list[Path], str | 
         if not target.exists():
             return [], f"Path not found: {raw_entry}"
         if target.is_dir():
-            collected.extend(sorted(target.rglob("*.py")))
+            collected.extend(
+                path
+                for path in sorted(target.rglob("*.py"))
+                if not any(part in SKIP_DIRS for part in path.relative_to(target).parts)
+            )
         else:
             collected.append(target)
     return collected, None
@@ -328,7 +335,11 @@ def parse_ignore_directives(source: str, file_path: str) -> tuple[dict[int, Igno
         inner = match.group(1) or ""
         rules = frozenset(RULE_ID_PATTERN.findall(inner))
         has_reason = REASON_PATTERN.search(inner) is not None
-        directives[line_no] = IgnoreDirective(line=line_no, rules=rules, has_reason=has_reason)
+        stripped_without_reason = REASON_PATTERN.sub("", inner).strip(" ,")
+        is_wildcard = not stripped_without_reason
+        directives[line_no] = IgnoreDirective(
+            line=line_no, rules=rules, has_reason=has_reason, is_wildcard=is_wildcard
+        )
         if not has_reason:
             violations.append(
                 Violation(file_path, line_no, "CANON-08", 'topdown-ignore requires a non-empty reason="...".')
@@ -341,20 +352,27 @@ def filter_suppressed(
     checked_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
     directives: dict[int, IgnoreDirective],
 ) -> list[Violation]:
-    fn_spans = [(fn_node.lineno, fn_node.end_lineno or fn_node.lineno) for fn_node in checked_functions]
+    fn_spans = [
+        (
+            fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno,
+            fn_node.lineno,
+            fn_node.end_lineno or fn_node.lineno,
+        )
+        for fn_node in checked_functions
+    ]
     kept: list[Violation] = []
     for entry in violations:
         span_lines = {
             line_num
-            for start_line, end_line in fn_spans
-            if start_line <= entry.line <= end_line
-            for line_num in (start_line, start_line - 1)
+            for dec_line, def_line, end_line in fn_spans
+            if dec_line <= entry.line <= end_line
+            for line_num in (dec_line, dec_line - 1, def_line, def_line - 1)
         }
         candidate_lines = {entry.line, entry.line - 1} | span_lines
         is_suppressed = any(
             (directive := directives.get(check_line)) is not None
             and directive.has_reason
-            and (not directive.rules or entry.rule in directive.rules)
+            and (directive.is_wildcard or entry.rule in directive.rules)
             for check_line in candidate_lines
         )
         if not is_suppressed:
@@ -489,6 +507,10 @@ def scan_test_runner_branching(
             and isinstance(node.left, ast.Constant)
             and node.left.value in TEST_MODULE_MARKERS
             and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)
+            and any(
+                isinstance(comp, ast.Attribute) and comp.attr == "modules"
+                for comp in node.comparators
+            )
         ):
             violations.append(
                 Violation(file_path, node.lineno, "LLM-07", f"Test-runner module check '{node.left.value}' in production code -> inject test behavior via explicit L0 parameters.")
@@ -536,7 +558,11 @@ def rebuild_reordered_source(
     prev_end = 0
     for fn_node in top_functions:
         start_idx = fn_node.lineno - 1
-        while start_idx > prev_end and lines[start_idx - 1].lstrip().startswith("#"):
+        while (
+            start_idx > prev_end
+            and lines[start_idx - 1].lstrip().startswith("#")
+            and not HEADER_COMMENT_PATTERN.match(lines[start_idx - 1].lstrip())
+        ):
             start_idx -= 1
         end_idx = fn_node.end_lineno or fn_node.lineno
         spans.append((start_idx, end_idx))
@@ -545,7 +571,10 @@ def rebuild_reordered_source(
     suffix = "".join(lines[spans[-1][1] :])
     blocks = ["".join(lines[spans[idx][0] : spans[idx][1]]).rstrip("\r\n") for idx in ordered_indices]
     trailing_newline = "\n" if source.endswith("\n") else ""
-    return prefix + "\n\n".join(blocks) + (suffix if suffix else trailing_newline)
+    if suffix:
+        sep = "\n" if suffix.startswith(("\n", "\r\n")) else "\n\n"
+        return prefix + "\n\n".join(blocks) + sep + suffix
+    return prefix + "\n\n".join(blocks) + trailing_newline
 
 
 if __name__ == "__main__":

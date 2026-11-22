@@ -18,6 +18,7 @@
 cognitive-complexity-threshold = 10
 too-many-arguments-threshold = 4
 too-many-lines-threshold = 80
+allow-unwrap-in-tests = true
 ```
 
 Enable in `Cargo.toml` or crate root: `#![deny(clippy::unwrap_used, dead_code)]`.

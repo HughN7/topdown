@@ -15,6 +15,7 @@ const MAX_BUSINESS_DEPTH = 2;
 const VAGUE_NOUNS = new Set(["data", "info", "item", "temp", "result", "handler"]);
 const GAMING_NAME_PATTERN = /(?:_part\d+|_helper\d*|Part\d+|Helper\d*)$/;
 const TS_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".svelte-kit", ".next"]);
 const IGNORE_PATTERN = /\/\/\s*topdown-ignore(?:\((.*)\))?/;
 const REASON_PATTERN = /reason\s*=\s*(?:"([^"]+)"|'([^']+)')/;
 const RULE_ID_PATTERN = /\b(?:CANON|LLM)-\d{2}\b/g;
@@ -103,14 +104,15 @@ export async function loadTypeScript() {
 }
 
 export function checkSourceWithAst(source, filePath, tsMod) {
-  const { comments } = lexSource(source);
+  const isJsx = /\.[jt]sx$/i.test(filePath);
+  const { cleaned, comments } = lexSource(source, isJsx);
   const { directives, ignoreViolations } = parseIgnoreDirectives(comments, filePath);
   const sf = tsMod.createSourceFile(filePath, source, tsMod.ScriptTarget.Latest, true);
   const topFunctions = collectTopLevelAstFunctions(sf, tsMod);
   const rawViolations = [
     ...checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath),
     ...checkAstFunctionRules(topFunctions, sf, tsMod, filePath),
-    ...checkTestRunnerBranching(source, filePath),
+    ...checkTestRunnerBranching(source, cleaned.split(/\r?\n/), filePath),
   ];
   const spans = topFunctions.map((entry) => ({ startLine: entry.startLine, endLine: entry.endLine }));
   const kept = filterSuppressed(rawViolations, spans, directives);
@@ -146,23 +148,38 @@ export function fixSourceWithAst(source, filePath, tsMod) {
   if (isAlreadySorted) {
     return { source, refusal: null };
   }
-  const prefix = source.slice(0, fnPositions[0].stmt.getFullStart());
-  const suffix = source.slice(fnPositions[fnPositions.length - 1].stmt.getEnd());
-  const blocks = ordered.map((idx) => source.slice(fnPositions[idx].stmt.getFullStart(), fnPositions[idx].stmt.getEnd()).trim());
-  const prefixTrim = prefix.trimEnd();
-  const lead = prefixTrim ? `${prefixTrim}\n\n` : "";
-  return { source: `${lead}${blocks.join("\n\n")}${suffix || "\n"}`, refusal: null };
+  const sourceLines = source.split(/\r?\n/);
+  const spans = fnPositions.map((entry, idx) => {
+    const startLine = sf.getLineAndCharacterOfPosition(entry.stmt.getStart(sf)).line;
+    const prevEndLine = idx > 0 ? sf.getLineAndCharacterOfPosition(fnPositions[idx - 1].stmt.getEnd()).line + 1 : 0;
+    let blockStartLine = startLine;
+    while (blockStartLine > prevEndLine && sourceLines[blockStartLine - 1].trim().startsWith("//")) {
+      if (blockStartLine - 1 === 0 && /@ts-|eslint-disable|copyright|license/i.test(sourceLines[0])) {
+        break;
+      }
+      blockStartLine -= 1;
+    }
+    const endLine = sf.getLineAndCharacterOfPosition(entry.stmt.getEnd()).line + 1;
+    return { startLine: blockStartLine, endLine };
+  });
+  const prefix = sourceLines.slice(0, spans[0].startLine).join("\n");
+  const suffix = sourceLines.slice(spans[spans.length - 1].endLine).join("\n");
+  const blocks = ordered.map((idx) => sourceLines.slice(spans[idx].startLine, spans[idx].endLine).join("\n").trimEnd());
+  const lead = prefix.trimEnd() ? `${prefix.trimEnd()}\n\n` : "";
+  const tail = suffix.trim() ? `\n\n${suffix.trimStart()}` : "\n";
+  return { source: `${lead}${blocks.join("\n\n")}${tail}`, refusal: null };
 }
 
 export function checkSource(source, filePath) {
-  const { cleaned, comments } = lexSource(source);
+  const isJsx = /\.[jt]sx$/i.test(filePath);
+  const { cleaned, comments } = lexSource(source, isJsx);
   const { directives, ignoreViolations } = parseIgnoreDirectives(comments, filePath);
   const lines = cleaned.split(/\r?\n/);
   const functions = extractFunctions(lines);
   const rawViolations = [
     ...checkFunctionBlocks(functions, lines, filePath),
     ...checkTernariesAndEmptyCatches(cleaned, lines, filePath),
-    ...checkTestRunnerBranching(source, filePath),
+    ...checkTestRunnerBranching(source, lines, filePath),
   ];
   const kept = filterSuppressed(rawViolations, functions, directives);
   return [...ignoreViolations, ...kept].sort(
@@ -220,14 +237,16 @@ function checkTernariesAndEmptyCatches(cleaned, lines, filePath) {
   return violations;
 }
 
-function checkTestRunnerBranching(source, filePath) {
+function checkTestRunnerBranching(source, cleanedLines, filePath) {
   if (TEST_PATH_PATTERN.test(filePath)) {
     return [];
   }
   const violations = [];
   const rawLines = source.split(/\r?\n/);
   for (let idx = 0; idx < rawLines.length; idx += 1) {
-    if (TEST_RUNNER_BRANCH_PATTERN.test(rawLines[idx]) && !rawLines[idx].trim().startsWith("//")) {
+    const cleanedLine = cleanedLines[idx] ?? "";
+    const hasEnvInCode = /\bprocess\.env\b/.test(cleanedLine);
+    if (hasEnvInCode && TEST_RUNNER_BRANCH_PATTERN.test(rawLines[idx])) {
       violations.push({
         path: filePath,
         line: idx + 1,
@@ -288,12 +307,17 @@ function collectTargetFiles(rawPaths) {
     const entries = fs.readdirSync(current, { withFileTypes: true });
     queue.push(
       ...entries
-        .filter((entry) => entry.isDirectory() && entry.name !== "node_modules")
+        .filter((entry) => entry.isDirectory() && !SKIP_DIRS.has(entry.name))
         .map((entry) => path.join(current, entry.name)),
     );
     files.push(
       ...entries
-        .filter((entry) => entry.isFile() && TS_EXTENSIONS.has(path.extname(entry.name)))
+        .filter(
+          (entry) =>
+            entry.isFile() &&
+            TS_EXTENSIONS.has(path.extname(entry.name)) &&
+            !entry.name.endsWith(".d.ts"),
+        )
         .map((entry) => path.join(current, entry.name)),
     );
   }
@@ -321,7 +345,8 @@ function parseIgnoreDirectives(comments, filePath) {
     const inner = match[1] ?? "";
     const rules = new Set(inner.match(RULE_ID_PATTERN) ?? []);
     const hasReason = REASON_PATTERN.test(inner);
-    directives.set(comment.line, { line: comment.line, rules, hasReason });
+    const isWildcard = inner.replace(REASON_PATTERN, "").replace(/[,\s]/g, "").length === 0;
+    directives.set(comment.line, { line: comment.line, rules, hasReason, isWildcard });
     if (!hasReason) {
       ignoreViolations.push({
         path: filePath,
@@ -334,7 +359,7 @@ function parseIgnoreDirectives(comments, filePath) {
   return { directives, ignoreViolations };
 }
 
-function lexSource(source) {
+function lexSource(source, isJsx = false) {
   const state = { out: "", comments: [], line: 1, idx: 0, lastToken: "", exprBraceStack: [] };
   while (state.idx < source.length) {
     const ch = source[state.idx];
@@ -345,6 +370,10 @@ function lexSource(source) {
     }
     if (ch === "/" && next === "*") {
       consumeBlockComment(source, state);
+      continue;
+    }
+    if (ch === "'" && isJsx && /^[A-Za-z]$/.test(source[state.idx - 1] ?? "") && /^[A-Za-z]$/.test(next)) {
+      advanceCodeChar(source, state, " ");
       continue;
     }
     if (ch === '"' || ch === "'") {
@@ -390,7 +419,7 @@ function consumeBlockComment(source, state) {
 }
 
 function consumeQuotedString(source, state, quoteChar) {
-  state.out += " ";
+  state.out += "_";
   state.idx += 1;
   while (state.idx < source.length) {
     const ch = source[state.idx];
@@ -517,6 +546,7 @@ function canStartRegex(lastToken) {
 function extractFunctions(lines) {
   const spans = [];
   let braceDepth = 0;
+  let parenDepth = 0;
   let pendingStart = -1;
   let activeStart = -1;
   let activeBodyStart = -1;
@@ -525,16 +555,19 @@ function extractFunctions(lines) {
     const trimmed = lines[idx].trim();
     const opens = countChar(lines[idx], "{");
     const closes = countChar(lines[idx], "}");
+    const openParens = countChar(lines[idx], "(");
+    const closeParens = countChar(lines[idx], ")");
     const isDeclStart = FUNC_DECL_PATTERN.test(trimmed) || ARROW_DECL_PATTERN.test(trimmed);
     if (activeStart === -1 && pendingStart === -1 && braceDepth === 0 && isDeclStart) {
       pendingStart = idx + 1;
     }
-    if (pendingStart !== -1 && opens > 0) {
+    parenDepth += openParens - closeParens;
+    if (pendingStart !== -1 && parenDepth <= 0 && opens > closes) {
       activeStart = pendingStart;
       activeBodyStart = idx + 1;
       activeBaseDepth = braceDepth;
       pendingStart = -1;
-    } else if (pendingStart !== -1 && trimmed.endsWith(";")) {
+    } else if (pendingStart !== -1 && parenDepth <= 0 && trimmed.endsWith(";")) {
       pendingStart = -1;
     }
     braceDepth += opens - closes;
@@ -607,7 +640,7 @@ function filterSuppressed(violations, functions, directives) {
     }
     for (const lineNo of candidateLines) {
       const directive = directives.get(lineNo);
-      if (directive && directive.hasReason && (directive.rules.size === 0 || directive.rules.has(entry.rule))) {
+      if (directive && directive.hasReason && (directive.isWildcard || directive.rules.has(entry.rule))) {
         return false;
       }
     }
@@ -733,7 +766,7 @@ function scanAstFunctionBody(entry, sf, tsMod, filePath) {
     const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
     if (tsMod.isFunctionDeclaration(node) && node !== entry.node) {
       violations.push({ path: filePath, line, rule: "CANON-05", message: "Nested function declaration is banned -> lift to module top level." });
-    } else if (tsMod.isConditionalExpression(node) && (tsMod.isConditionalExpression(node.whenTrue) || tsMod.isConditionalExpression(node.whenFalse))) {
+    } else if (tsMod.isConditionalExpression(node) && (isConditionalExpr(node.whenTrue, tsMod) || isConditionalExpr(node.whenFalse, tsMod))) {
       violations.push({ path: filePath, line, rule: "CANON-05", message: "Nested ternary expression is banned -> replace with flat if/return guard clauses." });
     } else if (tsMod.isCatchClause(node) && node.block.statements.length === 0) {
       violations.push({ path: filePath, line, rule: "LLM-02", message: "Empty catch block silently swallows errors -> handle or propagate to L0." });
@@ -754,6 +787,14 @@ function scanAstFunctionBody(entry, sf, tsMod, filePath) {
     });
   }
   return violations;
+}
+
+function isConditionalExpr(node, tsMod) {
+  let current = node;
+  while (tsMod.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  return tsMod.isConditionalExpression(current);
 }
 
 function collectAstCalls(fnNode, nameSet, tsMod) {

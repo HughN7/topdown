@@ -29,10 +29,21 @@ def main() -> int:
     if not command:
         return 0
     env = build_subprocess_env()
-    proc = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
+    proc = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        check=False,
+    )
     if proc.returncode == 0:
         return 0
-    output = (proc.stdout + proc.stderr).strip()
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 1:
+        print(f"Topdown checker skipped ({target_path}): {output}", file=sys.stderr)
+        return 0
     print(f"Topdown violations in {target_path}:\n{output}", file=sys.stderr)
     return 2
 

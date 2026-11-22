@@ -9,7 +9,19 @@ from pathlib import Path
 
 from engine.specs import spec_for_path
 
-SKIP_DIRS = frozenset({".git", ".venv", "node_modules", "target", "__pycache__", "dist", "build"})
+SKIP_DIRS = frozenset({
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "target",
+    "__pycache__",
+    "dist",
+    "build",
+    ".build",
+    ".svelte-kit",
+    ".next",
+})
 
 
 @dataclass(frozen=True)
@@ -28,9 +40,13 @@ def main() -> int:
         from engine.analyzer import Violation, analyze_source
         from engine.boundaries import check_file_boundaries, load_boundary_config
     except ImportError as exc:
-        print(f"Missing optional engine dependency: {exc}. Install with `pip install -e .`.", file=sys.stderr)
+        print(f"Missing optional engine dependency: {exc}.", file=sys.stderr)
         return 2
-    first_target = Path(options.paths[0]).resolve()
+    first_raw = Path(options.paths[0])
+    if not first_raw.exists():
+        print(f"Path not found: {options.paths[0]}", file=sys.stderr)
+        return 2
+    first_target = first_raw.resolve()
     config_root = first_target if first_target.is_dir() else first_target.parent
     boundary_cfg, cfg_error = load_boundary_config(config_root, options.config_path)
     if cfg_error is not None:
@@ -45,12 +61,15 @@ def main() -> int:
     for file_path in target_files:
         try:
             source_text = file_path.read_text(encoding="utf-8")
+            file_violations = analyze_source(source_text, str(file_path))
+            boundary_violations = check_file_boundaries(source_text, file_path, boundary_cfg) if boundary_cfg is not None else []
+            all_violations.extend(file_violations + boundary_violations)
         except (OSError, UnicodeDecodeError) as exc:
             print(f"Error reading {file_path}: {exc}", file=sys.stderr)
             return 2
-        all_violations.extend(analyze_source(source_text, str(file_path)))
-        if boundary_cfg is not None:
-            all_violations.extend(check_file_boundaries(source_text, file_path, boundary_cfg))
+        except Exception as exc:
+            print(f"Engine error on {file_path}: {exc}", file=sys.stderr)
+            return 2
     emit_violations(all_violations, as_json=options.as_json)
     return 1 if all_violations else 0
 
@@ -84,24 +103,32 @@ def collect_supported_files(
     *,
     exclude_dirs: tuple[str, ...] = (),
 ) -> tuple[list[Path], str | None]:
-    skip_names = SKIP_DIRS | frozenset(exclude_dirs)
     collected: list[Path] = []
     for raw_entry in raw_paths:
         target = Path(raw_entry)
         if not target.exists():
             return [], f"Path not found: {raw_entry}"
         if target.is_file():
-            collected.append(target)
+            is_supported = spec_for_path(target) is not None and not target.name.endswith(".d.ts")
+            collected.extend([target] if is_supported else [])
             continue
         found = [
             path
             for path in sorted(target.rglob("*"))
             if path.is_file()
             and spec_for_path(path) is not None
-            and not any(part in skip_names for part in path.parts)
+            and not path.name.endswith(".d.ts")
+            and not is_excluded_rel_path(path.relative_to(target), exclude_dirs)
         ]
         collected.extend(found)
     return collected, None
+
+
+def is_excluded_rel_path(rel_path: Path, exclude_dirs: tuple[str, ...]) -> bool:
+    if any(part in SKIP_DIRS for part in rel_path.parts):
+        return True
+    rel_posix = rel_path.as_posix()
+    return any(rel_posix == prefix or rel_posix.startswith(f"{prefix}/") for prefix in exclude_dirs)
 
 
 def emit_violations(violations: list[object], *, as_json: bool) -> None:

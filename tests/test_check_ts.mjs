@@ -284,3 +284,38 @@ test("positive-witness TS idioms pass with 0 violations and 0 waivers", async ()
   assert.ok(!source.includes("topdown-ignore"));
   assert.deepEqual(checkSource(source, witnessPath), []);
 });
+
+test("JSX apostrophes, destructured signatures, and quoted optional keys handled cleanly", async () => {
+  const { checkSource } = await import("../enforcement/check_ts.mjs");
+  const jsxWithViolation = [
+    "export function Card(flagA: boolean, flagB: boolean, flagC: boolean) {",
+    "  const view = <div>it's fine</div>;",
+    "  if (flagA) {",
+    "    if (flagB) {",
+    "      if (flagC) {",
+    "        return view;",
+    "      }",
+    "    }",
+    "  }",
+    "  return null;",
+    "}",
+  ].join("\n");
+  const destructuredDeep = [
+    "export function run(",
+    "  { flagA, flagB, flagC }: { flagA: boolean; flagB: boolean; flagC: boolean },",
+    "): number {",
+    "  if (flagA) {",
+    "    if (flagB) {",
+    "      if (flagC) {",
+    "        return 1;",
+    "      }",
+    "    }",
+    "  }",
+    "  return 0;",
+    "}",
+  ].join("\n");
+  const quotedOptionalKeys = 'type Headers = { "x-a"?: string; "x-b"?: string };\n';
+  assert.ok(checkSource(jsxWithViolation, "Card.tsx").some((e) => e.rule === "CANON-05"));
+  assert.ok(checkSource(destructuredDeep, "run.ts").some((e) => e.rule === "CANON-05"));
+  assert.deepEqual(checkSource(quotedOptionalKeys, "types.ts"), []);
+});

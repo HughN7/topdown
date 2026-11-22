@@ -215,6 +215,26 @@ class TestCheckRust(unittest.TestCase):
         self.assertIn("LLM-07", [v.rule for v in check_rust.check_source(inline_cfg, "src/mailer.rs")])
         self.assertEqual(check_rust.check_source(inline_cfg, "tests/mailer_test.rs"), [])
 
+    def test_byte_raw_strings_nested_comments_and_let_else_handled(self) -> None:
+        import check_rust
+
+        clean = (
+            "pub fn parse(opt: Option<i64>, flag_a: bool, flag_b: bool) -> i64 {\n"
+            '    let bytes = br#"hello "world" {"#;\n'
+            "    /* outer /* inner */ fn fake() { opt.unwrap(); } */\n"
+            "    let brace = '\\x7b';\n"
+            "    let _ = (bytes, brace);\n"
+            "    if flag_a {\n"
+            "        if flag_b {\n"
+            "            let Some(val) = opt else { return 0; };\n"
+            "            return val;\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        self.assertEqual(check_rust.check_source(clean, "ok.rs"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
