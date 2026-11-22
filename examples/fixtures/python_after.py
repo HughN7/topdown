@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 VIP_FEE_BPS = 100
@@ -32,22 +33,26 @@ class BatchSummary:
     settled_payouts: tuple[SettledPayout, ...]
 
 
-# L0 Orchestrator
+# L0 Orchestrator (I/O Shell)
 def process_payout_batch(
     requests: tuple[PayoutRequest, ...],
     *,
     tier: str,
     min_fee_cents: int,
     is_dry_run: bool,
+    save_summary: Callable[[BatchSummary], None] | None = None,
 ) -> BatchSummary:
     settled = settle_eligible_payouts(requests, tier=tier, min_fee_cents=min_fee_cents)
     total_net_cents = sum(payout.net_cents for payout in settled)
-    return BatchSummary(
+    summary = BatchSummary(
         is_dry_run=is_dry_run,
         total_net_cents=total_net_cents,
         formatted_total=format_cents_usd(total_net_cents),
         settled_payouts=settled,
     )
+    if not is_dry_run and save_summary is not None:
+        save_summary(summary)
+    return summary
 
 
 # L1 Pure Workflow
