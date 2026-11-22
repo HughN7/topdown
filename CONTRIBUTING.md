@@ -24,7 +24,8 @@ Topdown stays effective by staying **small, opinionated, and zero-dependency**. 
 
 ## Adding or Updating Enforcement Checkers
 
-- Keep checkers zero-dependency by default (optional AST backends like `typescript` must fall back gracefully unless `--backend=ast` is explicitly requested).
+- Keep `enforcement/` checkers zero-dependency by default (optional AST backends like `typescript` must fall back gracefully unless `--backend=ast` is explicitly requested).
+- To add a new language to the optional universal `tree-sitter` engine, add a single `LanguageSpec` entry to [`engine/specs.py`](engine/specs.py) and a test case in `tests/test_engine.py`.
 - **Safe `--fix` rule:** Only implement `--fix` / `--dry-run` on AST-backed checkers; never rewrite user source code from regex/brace heuristics.
 - Add unit tests in `tests/` and idiomatic zero-waiver cases in `tests/positive_witness/`.
 - **Dogfood everything before opening a PR:**

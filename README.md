@@ -30,14 +30,33 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 
 ### Language Support Matrix
 
-| Language | Pack | Linter | Checker Backend | `--fix` Re-sort |
-|---|---|---|---|---|
-| **Python** | [`python.md`](languages/python.md) | Ruff | Stdlib AST (`check_python.py`) | Safe subset (`--fix` / `--dry-run`) |
-| **TypeScript / JS** | [`typescript.md`](languages/typescript.md) | Oxlint / ESLint | Heuristic / Optional TS AST (`check_ts.mjs`) | Safe subset (`--backend=ast`) |
-| **Rust** | [`rust.md`](languages/rust.md) | Clippy | Heuristic (`check_rust.py`) | No *(requires AST)* |
-| **Swift** | [`swift.md`](languages/swift.md) | SwiftLint | Linter-only | No *(requires AST)* |
+| Language | Pack | Linter | Zero-Dep Checker | Universal AST Engine (`engine/`) | `--fix` Re-sort |
+|---|---|---|---|---|---|
+| **Python** | [`python.md`](languages/python.md) | Ruff | Stdlib AST (`check_python.py`) | Yes | Safe subset (`--fix` / `--dry-run`) |
+| **TypeScript / JS** | [`typescript.md`](languages/typescript.md) | Oxlint / ESLint | Heuristic / Optional TS AST (`check_ts.mjs`) | Yes | Safe subset (`--backend=ast`) |
+| **Rust** | [`rust.md`](languages/rust.md) | Clippy | Heuristic (`check_rust.py`) | Yes | No *(requires AST rewriter)* |
+| **Swift** | [`swift.md`](languages/swift.md) | SwiftLint | Linter-only | Yes | No *(requires AST rewriter)* |
+| **Go** | *(use `core/base.md`)* | golangci-lint | Linter-only | Yes | No *(requires AST rewriter)* |
 
-*Why isn't `--fix` universal?* Reordering code safely requires a real AST and language-specific hoisting rules (e.g., JS `const` arrow functions are not hoisted; Python decorators bind at import time). Heuristic and linter-only languages intentionally omit `--fix` and rely on actionable `CANON-01` diagnostics instead.
+*Why isn't `--fix` universal?* Reordering code safely requires a real AST and language-specific hoisting rules (e.g., JS `const` arrow functions are not hoisted; Python decorators bind at import time). Heuristic and linter-only paths intentionally omit `--fix` and rely on actionable `CANON-01` diagnostics instead.
+
+### Optional: Universal Tree-sitter Engine & Opt-In `CANON-02` Boundaries
+
+If you want one real AST engine across Python, TypeScript/JS, Rust, Swift, and Go—or opt-in cross-file I/O boundary checks—install the optional package (`pip install -e .`):
+
+```bash
+topdown src/                          # Single-file AST checks across all 5 languages (zero config)
+topdown --config topdown.toml src/    # Adds opt-in cross-file CANON-02 I/O boundary checks
+```
+
+Topdown **never assumes directory names** (`core/`, `domain/`, etc.) on external repos. Cross-file `CANON-02` checks run *only* when you explicitly declare `pure_dirs` in `topdown.toml`:
+
+```toml
+[boundaries]
+pure_dirs = ["src/domain"]        # required to enable cross-file CANON-02 checks
+shell_dirs = ["src/adapters"]     # optional: pure_dirs cannot import from shell_dirs
+extra_io_imports = ["stripe"]     # optional: project-specific I/O packages
+```
 
 *Using another language (Go, Kotlin, etc.)?* Point your agent at [`core/base.md`](core/base.md) plus any [`languages/*.md`](languages/) file as a template to generate a pack directly in your repo's `AGENTS.md`—or open a PR per [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
