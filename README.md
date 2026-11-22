@@ -171,6 +171,18 @@ Runs the checkers against the example pairs in [`examples/fixtures/`](examples/f
 | TypeScript | 4 | 0 | -4 | PASS |
 | Rust | 4 | 0 | -4 | PASS |
 
+## Legacy Codebase Audit Prompt (Implicit State Machines & Topdown Migration)
+
+Paste this prompt into your coding agent to audit an existing codebase for implicit state machines and structural debt while preserving external behavior:
+
+```text
+Audit this codebase under Topdown (core/base.md + matching languages/*.md and zones/*.md):
+1. Run the matching Topdown checker in enforcement/ to surface automated CANON-* and LLM-* violations (including CANON-03 parallel lifecycle boolean flags).
+2. Find all remaining implicit state machines across the app: parallel lifecycle booleans (isLoading/isError/isSuccess), dependent nullable fields that are only valid in certain phases, and scattered ad-hoc state mutations across UI handlers or L0 functions.
+3. Refactor each implicit state machine into an explicit discriminated union or sum-type enum (making impossible states unrepresentable) with pure L1/L2 transition functions, while keeping L0 I/O orchestrators thin and top-down (L0 -> L1 -> L2 -> L3).
+4. Make the decision that elevates UX (no impossible/flickering UI states), DX (exhaustive type checking, zero-mock unit tests), and AX (top-down readability) without breaking public APIs or existing tests.
+```
+
 ## Contributing & License
 
 Want to contribute a new language pack, zone profile, or checker? See [`CONTRIBUTING.md`](CONTRIBUTING.md).

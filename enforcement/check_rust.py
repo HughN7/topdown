@@ -27,6 +27,9 @@ TEST_PATH_PATTERN = re.compile(r"(?:^|[\\/])tests[\\/]|_test\.rs$", re.IGNORECAS
 SKIP_DIRS = frozenset({".git", "target", ".venv", "node_modules"})
 CHAR_LITERAL_PATTERN = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\])'")
 RAW_STRING_START_PATTERN = re.compile(r'(?:[bc])?r(#*)"')
+LIFECYCLE_BOOL_DECL_PATTERN = re.compile(
+    r"\b((?:is|has|was)_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle)|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\s*(?::\s*bool\b|=\s*(?:true|false)\b)"
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,7 @@ def check_source(source: str, file_path: str) -> list[Violation]:
     fn_spans = extract_fn_spans(masked_lines)
     raw_violations = (
         check_fn_spans(fn_spans, masked_lines, file_path)
+        + check_implicit_state_machines(masked_lines, file_path, directives)
         + check_unwrap_calls(masked_lines, file_path)
         + check_inline_cfg_test(cleaned_lines, fn_spans, file_path)
     )
@@ -131,6 +135,60 @@ def check_fn_spans(fn_spans: list[FnSpan], lines: list[str], file_path: str) -> 
             )
             for line_no in nested_lines
         )
+    return violations
+
+
+def check_implicit_state_machines(
+    lines: list[str],
+    file_path: str,
+    directives: dict[int, IgnoreDirective],
+) -> list[Violation]:
+    violations: list[Violation] = []
+    scope_stack: list[tuple[int, int, list[str]]] = []
+    closed_scopes: list[tuple[int, int, int, list[str]]] = []
+    paren_depth = 0
+    pending_start = -1
+    pending_flags: list[str] = []
+    for idx, line_text in enumerate(lines):
+        line_no = idx + 1
+        trimmed = line_text.strip()
+        if pending_start == -1 and trimmed:
+            pending_start = line_no
+        matched = [match.group(1) for match in LIFECYCLE_BOOL_DECL_PATTERN.finditer(line_text)]
+        paren_depth = max(0, paren_depth + line_text.count("(") - line_text.count(")"))
+        opens = line_text.count("{")
+        closes = line_text.count("}")
+        for _ in range(opens):
+            scope_stack.append((pending_start if pending_start != -1 else line_no, line_no, list(pending_flags)))
+            pending_start = -1
+            pending_flags.clear()
+        if scope_stack and paren_depth == 0:
+            scope_stack[-1][2].extend(matched)
+        else:
+            pending_flags.extend(matched)
+        for _ in range(min(closes, len(scope_stack))):
+            start_line, open_line, flags = scope_stack.pop()
+            closed_scopes.append((start_line, open_line, line_no, flags))
+        if opens == 0 and closes == 0 and paren_depth == 0 and trimmed.endswith(";"):
+            pending_start = -1
+            pending_flags.clear()
+    for start_line, open_line, end_line, flags in closed_scopes:
+        unique_flags = list(dict.fromkeys(flags))
+        is_ignored = any(
+            (directive := directives.get(check_line)) is not None
+            and directive.has_reason
+            and (directive.is_wildcard or "CANON-03" in directive.rules)
+            for check_line in range(start_line - 1, end_line + 1)
+        )
+        if len(unique_flags) >= 2 and not is_ignored:
+            violations.append(
+                Violation(
+                    file_path,
+                    open_line,
+                    "CANON-03",
+                    f"Implicit state machine ({', '.join(unique_flags)}) -> replace parallel lifecycle booleans with an explicit Rust enum.",
+                )
+            )
     return violations
 
 

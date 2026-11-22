@@ -254,6 +254,45 @@ class TestCheckRust(unittest.TestCase):
         self.assertEqual(check_rust.check_source(clean, "ok.rs"), [])
         self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(let_if_deep, "deep.rs")])
 
+    def test_implicit_state_machine_flags_canon03_and_separate_structs_pass(self) -> None:
+        import check_rust
+
+        bad_struct = (
+            "pub struct SyncView {\n"
+            "    pub is_loading: bool,\n"
+            "    pub is_error: bool,\n"
+            "}\n"
+        )
+        suppressed = (
+            '// topdown-ignore(CANON-03, reason="FFI struct layout")\n'
+            "#[derive(Debug, Clone)]\n"
+            "pub struct FfiState {\n"
+            "    pub is_pending: bool,\n"
+            "    pub is_failed: bool,\n"
+            "}\n"
+        )
+        separate_clean = (
+            "pub struct Account {\n"
+            "    pub is_active: bool,\n"
+            "    pub is_cleared: bool,\n"
+            "    pub is_loading: bool,\n"
+            "}\n"
+            "pub struct ErrorBanner {\n"
+            "    pub is_error: bool,\n"
+            "}\n"
+            "impl ErrorBanner {\n"
+            "    pub fn check_loading(&self, is_loading: bool) -> bool {\n"
+            "        is_loading\n"
+            "    }\n"
+            "    pub fn check_error(&self, is_error: bool) -> bool {\n"
+            "        is_error\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(bad_struct, "view.rs")])
+        self.assertEqual(check_rust.check_source(suppressed, "ffi.rs"), [])
+        self.assertEqual(check_rust.check_source(separate_clean, "clean.rs"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

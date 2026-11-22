@@ -28,6 +28,9 @@ IGNORE_PATTERN = re.compile(r"#\s*topdown-ignore(?:\((.*)\))?")
 REASON_PATTERN = re.compile(r"""reason\s*=\s*(?:"([^"]+)"|'([^']+)')""")
 RULE_ID_PATTERN = re.compile(r"\b(?:CANON|LLM)-\d{2}\b")
 HEADER_COMMENT_PATTERN = re.compile(r"^#(?:!|\s*-\*-|\s*coding[:=])")
+LIFECYCLE_BOOL_PATTERN = re.compile(
+    r"^(?:(?:is|has|was)_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle)|(?:loading|pending|fetching|submitting|errored|failed|succeeded))$"
+)
 CONTROL_NODES = (
     ast.If,
     ast.For,
@@ -153,20 +156,21 @@ def check_source(source: str, file_path: str) -> list[Violation]:
     top_functions = [
         node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
+    all_classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
     class_methods = [
         member
-        for node in tree.body
-        if isinstance(node, ast.ClassDef)
+        for node in all_classes
         for member in node.body
         if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
     checked_functions = top_functions + class_methods
     raw_violations: list[Violation] = []
     raw_violations.extend(check_order_and_depth(top_functions, file_path))
+    raw_violations.extend(check_class_state_machines(all_classes, file_path))
     is_test_file = bool(TEST_PATH_PATTERN.search(file_path))
     for fn_node in checked_functions:
         raw_violations.extend(check_function_rules(fn_node, file_path, is_test_file=is_test_file))
-    filtered = filter_suppressed(raw_violations, checked_functions, directives)
+    filtered = filter_suppressed(raw_violations, checked_functions + all_classes, directives)
     return sorted(ignore_violations + filtered, key=lambda entry: (entry.line, entry.rule))
 
 
@@ -210,6 +214,22 @@ def check_order_and_depth(
                         f"'{fn_node.name}' reaches call depth {depth} (max L0->L1->L2 + L3 leaf) "
                         "-> flatten pass-through calls or inline trivial helpers."
                     ),
+                )
+            )
+    return violations
+
+
+def check_class_state_machines(classes: list[ast.ClassDef], file_path: str) -> list[Violation]:
+    violations: list[Violation] = []
+    for cls_node in classes:
+        unique_flags = collect_node_lifecycle_flags(cls_node)
+        if len(unique_flags) >= 2:
+            violations.append(
+                Violation(
+                    file_path,
+                    cls_node.lineno,
+                    "CANON-03",
+                    f"Implicit state machine ({', '.join(unique_flags)}) -> replace parallel lifecycle booleans with an explicit status Enum or Literal union.",
                 )
             )
     return violations
@@ -268,6 +288,16 @@ def check_function_rules(
                 fn_node.lineno,
                 "CANON-05",
                 f"'{fn_node.name}' has nesting depth {nesting} (max {MAX_NESTING_DEPTH}) -> invert conditions with early return/continue or extract an L2 predicate.",
+            )
+        )
+    lifecycle_flags = collect_node_lifecycle_flags(fn_node)
+    if len(lifecycle_flags) >= 2:
+        violations.append(
+            Violation(
+                file_path,
+                fn_node.lineno,
+                "CANON-03",
+                f"Implicit state machine ({', '.join(lifecycle_flags)}) -> replace parallel lifecycle booleans with an explicit status Enum or Literal union.",
             )
         )
     violations.extend(scan_body_violations(fn_node, file_path))
@@ -352,7 +382,7 @@ def parse_ignore_directives(source: str, file_path: str) -> tuple[dict[int, Igno
 
 def filter_suppressed(
     violations: list[Violation],
-    checked_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    checked_functions: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef],
     directives: dict[int, IgnoreDirective],
 ) -> list[Violation]:
     fn_spans = [
@@ -369,7 +399,7 @@ def filter_suppressed(
             line_num
             for dec_line, def_line, end_line in fn_spans
             if dec_line <= entry.line <= end_line
-            for line_num in (dec_line, dec_line - 1, def_line, def_line - 1)
+            for line_num in range(dec_line - 1, def_line + 1)
         }
         candidate_lines = {entry.line, entry.line - 1} | span_lines
         is_suppressed = any(
@@ -439,6 +469,55 @@ def measure_max_nesting(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
             for child in ast.iter_child_nodes(node)
         )
     return max_depth
+
+
+def collect_node_lifecycle_flags(
+    scope_node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[str]:
+    candidates: list[tuple[str, ast.AST | None, ast.AST | None]] = []
+    if isinstance(scope_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        all_params = scope_node.args.posonlyargs + scope_node.args.args + scope_node.args.kwonlyargs
+        candidates.extend((param.arg, param.annotation, None) for param in all_params)
+    candidates.extend(
+        (stmt.target.id, stmt.annotation, stmt.value)
+        for stmt in scope_node.body
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+    )
+    candidates.extend(
+        (target.id, None, stmt.value)
+        for stmt in scope_node.body
+        if isinstance(stmt, ast.Assign)
+        for target in stmt.targets
+        if isinstance(target, ast.Name)
+    )
+    if isinstance(scope_node, ast.ClassDef):
+        candidates.extend(
+            (node.target.attr, node.annotation, node.value)
+            for node in ast.walk(scope_node)
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Attribute)
+            and isinstance(node.target.value, ast.Name)
+            and node.target.value.id == "self"
+        )
+        candidates.extend(
+            (target.attr, None, node.value)
+            for node in ast.walk(scope_node)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+        )
+    matched: list[str] = []
+    for name, ann, val in candidates:
+        if not LIFECYCLE_BOOL_PATTERN.match(name):
+            continue
+        is_bool_ann = ann is not None and isinstance(ann, ast.Name) and ann.id == "bool"
+        is_bool_val = ann is None and val is not None and isinstance(val, ast.Constant) and isinstance(val.value, bool)
+        is_bool_prefix = ann is None and val is None and name.startswith(("is_", "has_", "was_"))
+        if is_bool_ann or is_bool_val or is_bool_prefix:
+            matched.append(name)
+    return list(dict.fromkeys(matched))
 
 
 def scan_body_violations(

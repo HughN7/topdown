@@ -7,5 +7,6 @@
 
 | Rule | Override | Guardrail |
 |---|---|---|
+| **`CANON-03`** *(Tighten — Explicit Reactive State Machines)* | Model async/lifecycle state with a single `$state<DiscriminatedUnion>` or explicit `status` union, never parallel `$state` lifecycle booleans (`isLoading`, `isError`, `isSuccess`). | Route multi-field transitions through pure helper functions outside the singleton class. |
 | **`CANON-04`** *(Relax — Encapsulated Reactive State)* | Reactive orchestrator modules may use a **class singleton** (`#private` helpers, public entrypoint methods, and one exported `const` instance) to hold `$state` fields. | No other module-level mutable state; keep business calculations in pure, directly unit-testable functions outside the singleton class. |
 | **`CANON-05`** *(Relax — Reactive Callbacks)* | Inline reactive effects and derived callbacks may capture class `$state` fields. | Keep callback bodies `<= 8` lines and nesting depth `<= 2`. |

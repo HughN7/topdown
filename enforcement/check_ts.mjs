@@ -27,6 +27,8 @@ const TEST_RUNNER_BRANCH_PATTERN =
   /\bprocess\.env\.(?:VITEST|JEST_WORKER_ID)\b|\bprocess\.env\.NODE_ENV\s*===?\s*["']test["']/;
 const TEST_PATH_PATTERN =
   /(?:^|[\\/])(?:tests?|__tests__)[\\/]|\.(?:test|spec)\.[a-z]+$/i;
+const LIFECYCLE_BOOL_DECL_PATTERN =
+  /\b((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle|_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle))|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\b(?:\s*\??\s*:\s*boolean\b|\s*=\s*(?:true|false|\$state\s*\(\s*(?:true|false)\s*\)))|\[\s*((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle)|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\s*,[^\]]*\]\s*=\s*(?:React\.)?useState\b/g;
 const REGEX_PRECEDING_CHARS = new Set(["", "(", "[", "{", ",", ":", ";", "=", "!", "&", "|", "?", "+", "-", "*", "%", "~", "^", ">", "\n"]);
 const REGEX_PRECEDING_KEYWORDS = new Set(["return", "case", "default", "throw", "in", "of", "typeof", "void", "delete", "new", "yield", "await"]);
 
@@ -114,6 +116,7 @@ export function checkSourceWithAst(source, filePath, tsMod) {
   const rawViolations = [
     ...checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath),
     ...checkAstFunctionRules(allFunctions, sf, tsMod, filePath),
+    ...checkImplicitStateMachines(cleaned.split(/\r?\n/), filePath, directives),
     ...checkTestRunnerBranching(source, cleaned.split(/\r?\n/), filePath),
   ];
   const spans = allFunctions.map((entry) => ({ startLine: entry.startLine, endLine: entry.endLine }));
@@ -201,6 +204,7 @@ export function checkSource(source, filePath) {
   const rawViolations = [
     ...checkFunctionBlocks(functions, lines, filePath),
     ...checkTernariesAndEmptyCatches(cleaned, lines, filePath),
+    ...checkImplicitStateMachines(lines, filePath, directives),
     ...checkTestRunnerBranching(source, lines, filePath),
   ];
   const kept = filterSuppressed(rawViolations, functions, directives);
@@ -257,6 +261,68 @@ function checkTernariesAndEmptyCatches(cleaned, lines, filePath) {
     }
   }
   return violations;
+}
+
+function checkImplicitStateMachines(lines, filePath, directives) {
+  const violations = [];
+  const scopeStack = [];
+  const closedScopes = [];
+  let parenDepth = 0;
+  let pendingStart = -1;
+  let pendingFlags = [];
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const lineText = lines[idx];
+    const lineNo = idx + 1;
+    const trimmed = lineText.trim();
+    if (pendingStart === -1 && trimmed.length > 0) {
+      pendingStart = lineNo;
+    }
+    const matched = [...lineText.matchAll(LIFECYCLE_BOOL_DECL_PATTERN)].map((m) => m[1] ?? m[2]);
+    parenDepth = Math.max(0, parenDepth + countChar(lineText, "(") - countChar(lineText, ")"));
+    const opens = countChar(lineText, "{");
+    const closes = countChar(lineText, "}");
+    for (let k = 0; k < opens; k += 1) {
+      scopeStack.push({ startLine: pendingStart !== -1 ? pendingStart : lineNo, openLine: lineNo, flags: [...pendingFlags] });
+      pendingStart = -1;
+      pendingFlags = [];
+    }
+    if (scopeStack.length > 0 && parenDepth === 0) {
+      scopeStack[scopeStack.length - 1].flags.push(...matched);
+    } else {
+      pendingFlags.push(...matched);
+    }
+    const popCount = Math.min(closes, scopeStack.length);
+    for (let k = 0; k < popCount; k += 1) {
+      const popped = scopeStack.pop();
+      closedScopes.push({ ...popped, endLine: lineNo });
+    }
+    if (opens === 0 && closes === 0 && parenDepth === 0 && trimmed.endsWith(";")) {
+      pendingStart = -1;
+      pendingFlags = [];
+    }
+  }
+  for (const scope of closedScopes) {
+    const uniqueFlags = [...new Set(scope.flags)];
+    if (uniqueFlags.length >= 2 && !isScopeSuppressed(scope, directives)) {
+      violations.push({
+        path: filePath,
+        line: scope.openLine,
+        rule: "CANON-03",
+        message: `Implicit state machine (${uniqueFlags.join(", ")}) -> replace parallel lifecycle booleans with an explicit discriminated union.`,
+      });
+    }
+  }
+  return violations;
+}
+
+function isScopeSuppressed(scope, directives) {
+  for (let lineNo = scope.startLine - 1; lineNo <= scope.endLine; lineNo += 1) {
+    const directive = directives.get(lineNo);
+    if (directive && directive.hasReason && (directive.isWildcard || directive.rules.has("CANON-03"))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function checkTestRunnerBranching(source, cleanedLines, filePath) {

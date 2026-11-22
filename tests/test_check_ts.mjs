@@ -329,3 +329,56 @@ test("JSX apostrophes, destructured signatures, and quoted optional keys handled
   assert.deepEqual(checkSource(quotedOptionalKeys, "types.ts"), []);
   assert.deepEqual(checkSource(siblingTernaries, "siblings.tsx"), []);
 });
+
+test("implicit state machine lifecycle boolean soup flags CANON-03 while orthogonal booleans pass", async () => {
+  const { checkSource } = await import("../enforcement/check_ts.mjs");
+  const badInterface = [
+    "export interface QueryState {",
+    "  readonly isLoading: boolean;",
+    "  readonly isError: boolean;",
+    "}",
+  ].join("\n");
+  const badSvelteStore = [
+    "class CheckoutStore {",
+    "  isSubmitting = $state(false);",
+    "  isSuccess = $state(false);",
+    "}",
+  ].join("\n");
+  const suppressed = [
+    '// topdown-ignore(CANON-03, reason="legacy API payload")',
+    "export interface LegacyPayload {",
+    "  isLoading: boolean;",
+    "  isError: boolean;",
+    "}",
+  ].join("\n");
+  const cleanOrthogonal = [
+    "export interface Merchant {",
+    "  readonly isActive: boolean;",
+    "  readonly isCleared: boolean;",
+    "  readonly isLoading: boolean;",
+    "}",
+    "export interface OtherView {",
+    "  readonly isError: boolean;",
+    "}",
+    "export class OrderController {",
+    "  setLoading(isLoading: boolean): boolean {",
+    "    return isLoading;",
+    "  }",
+    "  setError(isError: boolean): boolean {",
+    "    return isError;",
+    "  }",
+    "}",
+  ].join("\n");
+  const bareAndHooks = [
+    "export function useRequest() {",
+    "  const [isLoading, setLoading] = useState(false);",
+    "  const [hasError, setHasError] = useState(false);",
+    "  return { isLoading, hasError, setLoading, setHasError };",
+    "}",
+  ].join("\n");
+  assert.ok(checkSource(badInterface, "state.ts").some((e) => e.rule === "CANON-03"));
+  assert.ok(checkSource(badSvelteStore, "store.svelte.ts").some((e) => e.rule === "CANON-03"));
+  assert.ok(checkSource(bareAndHooks, "hook.ts").some((e) => e.rule === "CANON-03"));
+  assert.deepEqual(checkSource(suppressed, "legacy.ts"), []);
+  assert.deepEqual(checkSource(cleanOrthogonal, "merchant.ts"), []);
+});

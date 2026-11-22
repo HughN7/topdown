@@ -6,7 +6,7 @@
 |---|---|
 | `CANON-01` | Format first with `swift-format`, then measure the 60–80 line cap. |
 | `CANON-02` | Keep I/O (`URLSession`, `FileManager`, `UserDefaults`, `Date.now`, SwiftData) in `L0` or thin adapters; keep `L1`/`L2`/`L3` pure (`Sendable` value types in -> out). |
-| `CANON-03` / `LLM-04` | Ban `[String: Any]` and `Any` across internal boundaries; use `struct`s and `enum`s with associated values. Swift's labeled parameters cover 4–6 named args natively without one-off DTO structs. |
+| `CANON-03` / `LLM-04` | Ban `[String: Any]`, `Any`, and parallel lifecycle `Bool` properties (`isLoading` + `isError`); use `struct`s and `enum`s with associated values. Swift's labeled parameters cover 4–6 named args natively without one-off DTO structs. |
 | `CANON-04` | Prefer `struct` value types and `let` properties; avoid `inout` and mutating `class` state outside `zones/systems-hotpath.md`. |
 | `CANON-05` | Use `guard ... else { return }` early exits and exhaustive `switch`; ban nested `func` declarations and nested ternaries. *(For SwiftUI `View` closures, apply `zones/frontend-ui.md` to `Views/` while keeping `Domain/` strict.)* |
 | `LLM-02` | Ban force-unwrapping (`!`), `try!`, and silent `try?` / `catch {}` error swallowing in non-test code. |

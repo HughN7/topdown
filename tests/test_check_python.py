@@ -451,6 +451,68 @@ class TestCheckPython(unittest.TestCase):
             self.assertEqual(proc_nul.returncode, 2)
             self.assertTrue(proc_nul.stderr.strip())
 
+    def test_implicit_state_machine_flags_canon03_and_orthogonal_booleans_pass(self) -> None:
+        import check_python
+
+        bad_dataclass = (
+            "from dataclasses import dataclass\n\n"
+            "@dataclass(frozen=True)\n"
+            "class FetchState:\n"
+            "    is_loading: bool = False\n"
+            "    is_error: bool = False\n"
+        )
+        bad_params = (
+            "def render_badge(*, is_pending: bool, is_completed: bool) -> str:\n"
+            '    return "done" if is_completed else "wait"\n'
+        )
+        suppressed = (
+            '# topdown-ignore(CANON-03, reason="external wire format")\n'
+            "class WireState:\n"
+            "    is_loading: bool = False\n"
+            "    is_error: bool = False\n"
+        )
+        orthogonal = (
+            "class Account:\n"
+            "    is_active: bool = True\n"
+            "    is_verified: bool = False\n"
+            "    is_loading: bool = False\n"
+        )
+        non_bool_counts = (
+            "from dataclasses import dataclass\n\n"
+            "@dataclass(frozen=True)\n"
+            "class QueueCounts:\n"
+            "    pending: int = 0\n"
+            "    failed: int = 0\n"
+            "    succeeded: int = 0\n\n"
+            "def format_counts(pending: int, failed: int) -> str:\n"
+            '    return f"{pending}/{failed}"\n'
+        )
+        init_and_locals = (
+            "class FetchController:\n"
+            "    def __init__(self) -> None:\n"
+            "        self.is_loading = False\n"
+            "        self.is_error = False\n\n"
+            "def run_request() -> bool:\n"
+            "    is_loading = True\n"
+            "    is_error = False\n"
+            "    return is_loading or is_error\n"
+        )
+        stacked_decorator_ignore = (
+            "from dataclasses import dataclass\n\n"
+            "@dataclass(frozen=True)\n"
+            '# topdown-ignore(CANON-03, reason="legacy schema")\n'
+            "class LegacyState:\n"
+            "    is_loading: bool = False\n"
+            "    is_error: bool = False\n"
+        )
+        self.assertIn("CANON-03", [v.rule for v in check_python.check_source(bad_dataclass, "state.py")])
+        self.assertIn("CANON-03", [v.rule for v in check_python.check_source(bad_params, "view.py")])
+        self.assertEqual(check_python.check_source(suppressed, "wire.py"), [])
+        self.assertEqual(check_python.check_source(orthogonal, "acct.py"), [])
+        self.assertEqual(check_python.check_source(non_bool_counts, "counts.py"), [])
+        self.assertEqual(len([v for v in check_python.check_source(init_and_locals, "init.py") if v.rule == "CANON-03"]), 2)
+        self.assertEqual(check_python.check_source(stacked_decorator_ignore, "dec.py"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
