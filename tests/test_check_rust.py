@@ -202,6 +202,19 @@ class TestCheckRust(unittest.TestCase):
         self.assertEqual(check_rust.check_source(parens, "p.rs"), [])
         self.assertEqual(check_rust.check_source(in_str, "s.rs"), [])
 
+    def test_inline_cfg_test_inside_fn_flags_llm07_but_mod_tests_passes(self) -> None:
+        import check_rust
+
+        inline_cfg = (
+            "pub fn send_email(address: &str) -> String {\n"
+            "    #[cfg(test)]\n"
+            '    return "stub".to_string();\n'
+            "    address.to_string()\n"
+            "}\n"
+        )
+        self.assertIn("LLM-07", [v.rule for v in check_rust.check_source(inline_cfg, "src/mailer.rs")])
+        self.assertEqual(check_rust.check_source(inline_cfg, "tests/mailer_test.rs"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

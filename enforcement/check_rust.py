@@ -23,6 +23,7 @@ NESTED_FN_PATTERN = re.compile(r"\bfn\s+[A-Za-z_]\w*")
 CONTROL_OPEN_PATTERN = re.compile(r"\b(?:if|for|while|loop|match)\b[^{]*\{|\belse\s*\{")
 UNWRAP_PATTERN = re.compile(r"\.(?:unwrap|unwrap_or_default)\s*\(")
 CFG_TEST_PATTERN = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+TEST_PATH_PATTERN = re.compile(r"(?:^|[\\/])tests[\\/]|_test\.rs$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -77,9 +78,14 @@ def main() -> int:
 def check_source(source: str, file_path: str) -> list[Violation]:
     cleaned, comments = lex_rust_source(source)
     directives, ignore_violations = parse_ignore_directives(comments, file_path)
-    masked_lines = mask_cfg_test_lines(cleaned.splitlines())
+    cleaned_lines = cleaned.splitlines()
+    masked_lines = mask_cfg_test_lines(cleaned_lines)
     fn_spans = extract_fn_spans(masked_lines)
-    raw_violations = check_fn_spans(fn_spans, masked_lines, file_path) + check_unwrap_calls(masked_lines, file_path)
+    raw_violations = (
+        check_fn_spans(fn_spans, masked_lines, file_path)
+        + check_unwrap_calls(masked_lines, file_path)
+        + check_inline_cfg_test(cleaned_lines, fn_spans, file_path)
+    )
     kept = filter_suppressed(raw_violations, fn_spans, directives)
     return sorted(ignore_violations + kept, key=lambda entry: (entry.line, entry.rule))
 
@@ -134,6 +140,26 @@ def check_unwrap_calls(lines: list[str], file_path: str) -> list[Violation]:
         )
         for idx, line_text in enumerate(lines)
         if UNWRAP_PATTERN.search(line_text)
+    ]
+
+
+def check_inline_cfg_test(
+    cleaned_lines: list[str],
+    fn_spans: list[FnSpan],
+    file_path: str,
+) -> list[Violation]:
+    if TEST_PATH_PATTERN.search(file_path):
+        return []
+    return [
+        Violation(
+            file_path,
+            line_no,
+            "LLM-07",
+            "Inline #[cfg(test)] inside production function -> inject test behavior via explicit L0 parameters.",
+        )
+        for span in fn_spans
+        for line_no in range(span.body_start_line + 1, span.end_line + 1)
+        if CFG_TEST_PATTERN.search(cleaned_lines[line_no - 1])
     ]
 
 

@@ -224,6 +224,94 @@ class TestCheckPython(unittest.TestCase):
         self.assertIn("->", part_violations[0].message)
         self.assertEqual(check_python.check_source(good_name, "ag3.py"), [])
 
+    def test_test_runner_branching_flags_llm07_in_prod_but_not_tests(self) -> None:
+        import check_python
+
+        prod_pytest = (
+            "import os\n\n"
+            "def send_email(address: str) -> str:\n"
+            '    if os.getenv("PYTEST_CURRENT_TEST"):\n'
+            '        return "stub"\n'
+            "    return address\n"
+        )
+        prod_unittest = (
+            "import sys\n\n"
+            "def send_email(address: str) -> str:\n"
+            '    if "unittest" in sys.modules:\n'
+            '        return "stub"\n'
+            "    return address\n"
+        )
+        self.assertIn("LLM-07", [v.rule for v in check_python.check_source(prod_pytest, "src/mailer.py")])
+        self.assertIn("LLM-07", [v.rule for v in check_python.check_source(prod_unittest, "src/mailer.py")])
+        self.assertEqual(check_python.check_source(prod_pytest, "tests/test_mailer.py"), [])
+
+    def test_fix_reorders_undecorated_functions_and_preserves_comments(self) -> None:
+        import check_python
+
+        out_of_order = (
+            '"""Module doc."""\n\n'
+            "# L3 Leaf\n"
+            "def format_usd(amount_cents: int) -> str:\n"
+            '    return f"${amount_cents / 100:.2f}"\n\n'
+            "# L0 Orchestrator\n"
+            "def render_total(amount_cents: int) -> str:\n"
+            "    return format_usd(amount_cents)\n"
+        )
+        fixed_source, refusal = check_python.fix_source(out_of_order)
+        self.assertIsNone(refusal)
+        self.assertLess(fixed_source.index("def render_total"), fixed_source.index("def format_usd"))
+        self.assertIn("# L3 Leaf\ndef format_usd", fixed_source)
+        self.assertEqual(check_python.check_source(fixed_source, "fixed.py"), [])
+
+        checker = ROOT_DIR / "enforcement" / "check_python.py"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = Path(tmp_dir) / "sample.py"
+            target.write_text(out_of_order, encoding="utf-8")
+            dry_proc = subprocess.run(
+                [sys.executable, str(checker), "--fix", "--dry-run", str(target)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(dry_proc.returncode, 0)
+            self.assertIn("@@", dry_proc.stdout)
+            self.assertEqual(target.read_text(encoding="utf-8"), out_of_order)
+
+            fix_proc = subprocess.run(
+                [sys.executable, str(checker), "--fix", str(target)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(fix_proc.returncode, 0)
+            self.assertEqual(check_python.check_source(target.read_text(encoding="utf-8"), str(target)), [])
+
+    def test_fix_refuses_decorated_interleaved_and_cyclic_files(self) -> None:
+        import check_python
+
+        decorated = (
+            "@register\n"
+            "def leaf(count: int) -> int:\n"
+            "    return count + 1\n\n"
+            "def caller(count: int) -> int:\n"
+            "    return leaf(count)\n"
+        )
+        interleaved = (
+            "def leaf(count: int) -> int:\n"
+            "    return count + 1\n\n"
+            "DISPATCH = leaf\n\n"
+            "def caller(count: int) -> int:\n"
+            "    return leaf(count)\n"
+        )
+        cyclic = (
+            "def ping(count: int) -> int:\n"
+            "    return pong(count)\n\n"
+            "def pong(count: int) -> int:\n"
+            "    return ping(count)\n"
+        )
+        for sample in (decorated, interleaved, cyclic):
+            fixed_source, refusal = check_python.fix_source(sample)
+            self.assertIsNotNone(refusal)
+            self.assertEqual(fixed_source, sample)
+
     def test_topdown_ignore_suppresses_with_reason_and_flags_without(self) -> None:
         import check_python
 

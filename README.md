@@ -23,10 +23,23 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 
 | Layer | Path | Purpose |
 |---|---|---|
-| **Core** | [`core/base.md`](core/base.md) | 14 language-agnostic rules (`CANON-01..08`, `LLM-01..06`): top-down `L0→L3` order, I/O shell / pure core, 60–80 line cap, max nesting depth 2, explicit types, human-gated overrides. |
-| **Languages** | [`languages/`](languages/) | Idiom mappings + runnable linter configs. Ships with [Python](languages/python.md), [TypeScript/JS](languages/typescript.md), [Rust](languages/rust.md), and [Swift](languages/swift.md); extensible to any language. |
+| **Core** | [`core/base.md`](core/base.md) | 15 language-agnostic rules (`CANON-01..08`, `LLM-01..07`): top-down `L0→L3` order, I/O shell / pure core, 60–80 line cap, max nesting depth 2, explicit types, no test-runner branching, human-gated overrides. |
+| **Languages** | [`languages/`](languages/) | Idiom mappings + runnable linter configs (see support matrix below). |
 | **Zones** | [`zones/`](zones/) | Optional directory-scoped rule overrides—either **relaxing** rules where framework/systems mechanics require it ([`frontend-ui.md`](zones/frontend-ui.md), [`svelte-state.md`](zones/svelte-state.md), [`systems-hotpath.md`](zones/systems-hotpath.md)) or **tightening** them for high-stakes paths ([`security-critical.md`](zones/security-critical.md)). |
-| **Enforcement** | [`enforcement/`](enforcement/) | Zero-dependency checkers (`check_python.py` full AST; `check_ts.mjs` and `check_rust.py` scoped heuristics), `run_hook.py` (`PostToolUse` dispatcher), and PR escape-hatch workflow. |
+| **Enforcement** | [`enforcement/`](enforcement/) | Zero-dependency checkers (`check_python.py`, `check_ts.mjs`, `check_rust.py`), `run_hook.py` (`PostToolUse` dispatcher), and PR escape-hatch workflow. |
+
+### Language Support Matrix
+
+| Language | Pack | Linter | Checker Backend | `--fix` Re-sort |
+|---|---|---|---|---|
+| **Python** | [`python.md`](languages/python.md) | Ruff | Stdlib AST (`check_python.py`) | Safe subset (`--fix` / `--dry-run`) |
+| **TypeScript / JS** | [`typescript.md`](languages/typescript.md) | Oxlint / ESLint | Heuristic / Optional TS AST (`check_ts.mjs`) | Safe subset (`--backend=ast`) |
+| **Rust** | [`rust.md`](languages/rust.md) | Clippy | Heuristic (`check_rust.py`) | No *(requires AST)* |
+| **Swift** | [`swift.md`](languages/swift.md) | SwiftLint | Linter-only | No *(requires AST)* |
+
+*Why isn't `--fix` universal?* Reordering code safely requires a real AST and language-specific hoisting rules (e.g., JS `const` arrow functions are not hoisted; Python decorators bind at import time). Heuristic and linter-only languages intentionally omit `--fix` and rely on actionable `CANON-01` diagnostics instead.
+
+*Using another language (Go, Kotlin, etc.)?* Point your agent at [`core/base.md`](core/base.md) plus any [`languages/*.md`](languages/) file as a template to generate a pack directly in your repo's `AGENTS.md`—or open a PR per [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Optional: Auto-Check on Every Edit (`PostToolUse` Hook)
 
@@ -137,23 +150,8 @@ Runs the checkers against the example pairs in [`examples/fixtures/`](examples/f
 
 ---
 
-## Adding a Language or Zone
+## Contributing & License
 
-- **New Language (`languages/<lang>.md`):** `core/base.md` is language-neutral. Add Go, Swift, Kotlin, etc. with one file containing: (1) **Idiom Mapping** (`CANON-01..08` / `LLM-01..05`), (2) **Standard Linter Config** (e.g., `.golangci.yml`, `.swiftlint.yml`), and (3) **Structural Checker** (command or linter-only note).
-- **New Zone (`zones/<zone>.md`):** Define the directory scope, a **Rule Overrides** table (each rule marked `Relax` or `Tighten`), and any required guardrail.
+Want to contribute a new language pack, zone profile, or checker? See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
----
-
-## Verify Locally
-
-```bash
-python3 -m unittest discover -s tests -p "test_*.py" -v
-node --test tests/test_check_ts.mjs
-python3 enforcement/check_python.py enforcement/check_python.py enforcement/check_rust.py enforcement/run_hook.py examples/verify_examples.py
-node enforcement/check_ts.mjs enforcement/check_ts.mjs
-python3 examples/verify_examples.py
-```
-
-## License
-
-[MIT](LICENSE)
+Licensed under [MIT](LICENSE).

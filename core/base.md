@@ -21,7 +21,7 @@ Every file reads top-down like a technical memo, separates I/O from pure busines
 
 ---
 
-## Part 2: Field-Observed LLM Code Tells (`LLM-01` – `LLM-06`)
+## Part 2: Field-Observed LLM Code Tells (`LLM-01` – `LLM-07`)
 
 | ID | Anti-Pattern | Rule |
 |---|---|---|
@@ -31,6 +31,7 @@ Every file reads top-down like a technical memo, separates I/O from pure busines
 | **`LLM-04`** | **No Single-Use DTO Bloat** | Use the language's idiomatic named/structured parameter mechanism instead of inventing one-off parameter wrapper types. |
 | **`LLM-05`** | **No Linter-Gaming Compression** | Never strip blank lines, pack multiple statements onto one line, or abbreviate identifiers to pass line caps; always format first, measure second. |
 | **`LLM-06`** | **No Dead Code or Unlinked TODOs** | Ban commented-out code, unused exports, and `TODO`/`FIXME` comments without a linked issue or ticket reference. |
+| **`LLM-07`** | **No Test-Runner Branching** | Never branch on test environment flags (`PYTEST_CURRENT_TEST`, `NODE_ENV === "test"`, `unittest` in `sys.modules`) inside production code; inject test behavior via explicit typed parameters at the `L0` I/O shell. |
 
 ---
 

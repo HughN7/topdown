@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import difflib
+import heapq
 import io
 import json
 import re
@@ -18,6 +20,9 @@ MAX_NESTING_DEPTH = 2
 MAX_BUSINESS_DEPTH = 2
 VAGUE_NOUNS = frozenset({"data", "info", "item", "temp", "result", "handler"})
 GAMING_NAME_PATTERN = re.compile(r"(?:_part\d+|_helper\d*)$", re.IGNORECASE)
+TEST_ENV_MARKERS = frozenset({"PYTEST_CURRENT_TEST", "UNITTEST_RUNNING"})
+TEST_MODULE_MARKERS = frozenset({"pytest", "unittest"})
+TEST_PATH_PATTERN = re.compile(r"(?:^|[\\/])(?:tests?|__tests__)[\\/]|(?:^|[\\/])test_[^\\/]+$|_test\.py$", re.IGNORECASE)
 IGNORE_PATTERN = re.compile(r"#\s*topdown-ignore(?:\((.*)\))?")
 REASON_PATTERN = re.compile(r"""reason\s*=\s*(?:"([^"]+)"|'([^']+)')""")
 RULE_ID_PATTERN = re.compile(r"\b(?:CANON|LLM)-\d{2}\b")
@@ -53,12 +58,14 @@ class IgnoreDirective:
 class CliOptions:
     paths: tuple[str, ...]
     as_json: bool
+    apply_fix: bool = False
+    dry_run: bool = False
 
 
 def main() -> int:
     options = parse_cli_args(sys.argv[1:])
     if options is None:
-        print("Usage: python3 check_python.py [--json] <path> [...]", file=sys.stderr)
+        print("Usage: python3 check_python.py [--json] [--fix] [--dry-run] <path> [...]", file=sys.stderr)
         return 2
     target_files, error_msg = collect_python_files(options.paths)
     if error_msg is not None:
@@ -66,17 +73,72 @@ def main() -> int:
         return 2
     all_violations: list[Violation] = []
     for file_path in target_files:
+        source_text, read_error = read_source_text(file_path)
+        if read_error is not None:
+            print(read_error, file=sys.stderr)
+            return 2
         try:
-            source_text = file_path.read_text(encoding="utf-8")
-            all_violations.extend(check_source(source_text, str(file_path)))
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
-            print(f"Error reading {file_path}: {exc}", file=sys.stderr)
+            source_text = apply_file_fix(source_text, file_path, dry_run=options.dry_run) if options.apply_fix else source_text
+            file_violations = [] if (options.apply_fix and options.dry_run) else check_source(source_text, str(file_path))
+        except (SyntaxError, ValueError) as exc:
+            print(f"Parse error in {file_path}: {exc}", file=sys.stderr)
             return 2
-        except SyntaxError as exc:
-            print(f"SyntaxError in {file_path}:{exc.lineno}: {exc.msg}", file=sys.stderr)
-            return 2
-    emit_violations(all_violations, as_json=options.as_json)
+        all_violations.extend(file_violations)
+    if not options.dry_run:
+        emit_violations(all_violations, as_json=options.as_json)
     return 1 if all_violations else 0
+
+
+def read_source_text(file_path: Path) -> tuple[str, str | None]:
+    try:
+        return file_path.read_text(encoding="utf-8"), None
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return "", f"Error reading {file_path}: {exc}"
+
+
+def apply_file_fix(source_text: str, file_path: Path, *, dry_run: bool) -> str:
+    fixed_text, refusal = fix_source(source_text)
+    if refusal is not None:
+        print(f"{file_path}: {refusal}", file=sys.stderr)
+        return source_text
+    if fixed_text == source_text:
+        return source_text
+    if dry_run:
+        diff_lines = difflib.unified_diff(
+            source_text.splitlines(keepends=True),
+            fixed_text.splitlines(keepends=True),
+            fromfile=f"a/{file_path}",
+            tofile=f"b/{file_path}",
+        )
+        print("".join(diff_lines), end="")
+        return source_text
+    file_path.write_text(fixed_text, encoding="utf-8")
+    return fixed_text
+
+
+def fix_source(source: str) -> tuple[str, str | None]:
+    tree = ast.parse(source)
+    fn_positions = [
+        (idx, node)
+        for idx, node in enumerate(tree.body)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if len(fn_positions) < 2:
+        return source, None
+    first_pos, last_pos = fn_positions[0][0], fn_positions[-1][0]
+    if last_pos - first_pos + 1 != len(fn_positions):
+        return source, "Refused --fix: interleaved statements between top-level functions."
+    top_functions = [node for _, node in fn_positions]
+    if any(fn_node.decorator_list for fn_node in top_functions):
+        return source, "Refused --fix: decorated top-level functions may have order-sensitive registration."
+    fn_lines = {fn_node.name: fn_node.lineno for fn_node in top_functions}
+    call_graph = {fn_node.name: collect_local_calls(fn_node, fn_lines) for fn_node in top_functions}
+    ordered_indices = topological_sort_functions(top_functions, call_graph)
+    if ordered_indices is None:
+        return source, "Refused --fix: cyclic/mutual recursion detected in local call graph."
+    if ordered_indices == list(range(len(top_functions))):
+        return source, None
+    return rebuild_reordered_source(source, top_functions, ordered_indices), None
 
 
 def check_source(source: str, file_path: str) -> list[Violation]:
@@ -95,8 +157,9 @@ def check_source(source: str, file_path: str) -> list[Violation]:
     checked_functions = top_functions + class_methods
     raw_violations: list[Violation] = []
     raw_violations.extend(check_order_and_depth(top_functions, file_path))
+    is_test_file = bool(TEST_PATH_PATTERN.search(file_path))
     for fn_node in checked_functions:
-        raw_violations.extend(check_function_rules(fn_node, file_path))
+        raw_violations.extend(check_function_rules(fn_node, file_path, is_test_file=is_test_file))
     filtered = filter_suppressed(raw_violations, checked_functions, directives)
     return sorted(ignore_violations + filtered, key=lambda entry: (entry.line, entry.rule))
 
@@ -149,6 +212,8 @@ def check_order_and_depth(
 def check_function_rules(
     fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
     file_path: str,
+    *,
+    is_test_file: bool = False,
 ) -> list[Violation]:
     violations: list[Violation] = []
     if GAMING_NAME_PATTERN.search(fn_node.name):
@@ -200,22 +265,32 @@ def check_function_rules(
             )
         )
     violations.extend(scan_body_violations(fn_node, file_path))
+    if not is_test_file:
+        violations.extend(scan_test_runner_branching(fn_node, file_path))
     return violations
 
 
 def parse_cli_args(raw_args: list[str]) -> CliOptions | None:
     as_json = False
+    apply_fix = False
+    dry_run = False
     paths: list[str] = []
     for token in raw_args:
         if token == "--json":
             as_json = True
+            continue
+        if token == "--fix":
+            apply_fix = True
+            continue
+        if token == "--dry-run":
+            dry_run = True
             continue
         if token.startswith("-"):
             return None
         paths.append(token)
     if not paths:
         return None
-    return CliOptions(paths=tuple(paths), as_json=as_json)
+    return CliOptions(paths=tuple(paths), as_json=as_json, apply_fix=apply_fix, dry_run=dry_run)
 
 
 def collect_python_files(raw_paths: tuple[str, ...]) -> tuple[list[Path], str | None]:
@@ -368,34 +443,19 @@ def scan_body_violations(
             continue
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             violations.append(
-                Violation(
-                    file_path,
-                    node.lineno,
-                    "CANON-05",
-                    f"Nested function '{node.name}' is banned -> lift to module top level as an L2/L3 helper.",
-                )
+                Violation(file_path, node.lineno, "CANON-05", f"Nested function '{node.name}' is banned -> lift to module top level as an L2/L3 helper.")
             )
             continue
         if isinstance(node, ast.IfExp) and (isinstance(node.body, ast.IfExp) or isinstance(node.orelse, ast.IfExp)):
             violations.append(
-                Violation(
-                    file_path,
-                    node.lineno,
-                    "CANON-05",
-                    "Nested inline conditional expression is banned -> replace with flat if/return guard clauses.",
-                )
+                Violation(file_path, node.lineno, "CANON-05", "Nested inline conditional expression is banned -> replace with flat if/return guard clauses.")
             )
             continue
         is_single_char = isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and len(node.id) == 1 and node.id != "_"
         is_vague_var = isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in VAGUE_NOUNS and id(node) not in comp_target_ids
         if is_single_char or is_vague_var:
             violations.append(
-                Violation(
-                    file_path,
-                    node.lineno,
-                    "LLM-03",
-                    f"Vague or single-char variable name '{node.id}' -> use a descriptive domain noun.",
-                )
+                Violation(file_path, node.lineno, "LLM-03", f"Vague or single-char variable name '{node.id}' -> use a descriptive domain noun.")
             )
             continue
         if not isinstance(node, ast.ExceptHandler):
@@ -409,14 +469,83 @@ def scan_body_violations(
         )
         if is_broad and (isinstance(only_stmt, ast.Pass) or is_empty_return):
             violations.append(
-                Violation(
-                    file_path,
-                    node.lineno,
-                    "LLM-02",
-                    "Broad exception handler silently swallows errors -> catch a specific exception or propagate to L0.",
-                )
+                Violation(file_path, node.lineno, "LLM-02", "Broad exception handler silently swallows errors -> catch a specific exception or propagate to L0.")
             )
     return violations
+
+
+def scan_test_runner_branching(
+    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    file_path: str,
+) -> list[Violation]:
+    violations: list[Violation] = []
+    for node in ast.walk(fn_node):
+        if isinstance(node, ast.Constant) and node.value in TEST_ENV_MARKERS:
+            violations.append(
+                Violation(file_path, node.lineno, "LLM-07", f"Test-runner env check '{node.value}' in production code -> inject test behavior via explicit L0 parameters.")
+            )
+        elif (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Constant)
+            and node.left.value in TEST_MODULE_MARKERS
+            and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)
+        ):
+            violations.append(
+                Violation(file_path, node.lineno, "LLM-07", f"Test-runner module check '{node.left.value}' in production code -> inject test behavior via explicit L0 parameters.")
+            )
+    return violations
+
+
+def topological_sort_functions(
+    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    call_graph: dict[str, set[str]],
+) -> list[int] | None:
+    name_to_idx = {fn_node.name: idx for idx, fn_node in enumerate(top_functions)}
+    in_degree = [0] * len(top_functions)
+    edges: list[list[int]] = [[] for _ in top_functions]
+    pairs = [
+        (caller_idx, name_to_idx[callee_name])
+        for caller_idx, fn_node in enumerate(top_functions)
+        for callee_name in sorted(call_graph.get(fn_node.name, set()))
+        if name_to_idx[callee_name] != caller_idx
+    ]
+    for caller_idx, callee_idx in pairs:
+        edges[caller_idx].append(callee_idx)
+        in_degree[callee_idx] += 1
+    ready = [idx for idx, deg in enumerate(in_degree) if deg == 0]
+    heapq.heapify(ready)
+    ordered: list[int] = []
+    while ready:
+        current = heapq.heappop(ready)
+        ordered.append(current)
+        for neighbor in edges[current]:
+            in_degree[neighbor] -= 1
+        newly_ready = [neighbor for neighbor in edges[current] if in_degree[neighbor] == 0]
+        for neighbor in newly_ready:
+            heapq.heappush(ready, neighbor)
+    return ordered if len(ordered) == len(top_functions) else None
+
+
+def rebuild_reordered_source(
+    source: str,
+    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    ordered_indices: list[int],
+) -> str:
+    lines = source.splitlines(keepends=True)
+    spans: list[tuple[int, int]] = []
+    prev_end = 0
+    for fn_node in top_functions:
+        start_idx = fn_node.lineno - 1
+        while start_idx > prev_end and lines[start_idx - 1].lstrip().startswith("#"):
+            start_idx -= 1
+        end_idx = fn_node.end_lineno or fn_node.lineno
+        spans.append((start_idx, end_idx))
+        prev_end = end_idx
+    prefix = "".join(lines[: spans[0][0]])
+    suffix = "".join(lines[spans[-1][1] :])
+    blocks = ["".join(lines[spans[idx][0] : spans[idx][1]]).rstrip("\r\n") for idx in ordered_indices]
+    trailing_newline = "\n" if source.endswith("\n") else ""
+    return prefix + "\n\n".join(blocks) + (suffix if suffix else trailing_newline)
 
 
 if __name__ == "__main__":

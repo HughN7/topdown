@@ -10,6 +10,10 @@ import { fileURLToPath } from "node:url";
 
 const MAX_FUNCTION_LINES = 80;
 const MAX_NESTING_DEPTH = 2;
+const MAX_POSITIONAL_ARGS = 3;
+const MAX_BUSINESS_DEPTH = 2;
+const VAGUE_NOUNS = new Set(["data", "info", "item", "temp", "result", "handler"]);
+const GAMING_NAME_PATTERN = /(?:_part\d+|_helper\d*|Part\d+|Helper\d*)$/;
 const TS_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 const IGNORE_PATTERN = /\/\/\s*topdown-ignore(?:\((.*)\))?/;
 const REASON_PATTERN = /reason\s*=\s*(?:"([^"]+)"|'([^']+)')/;
@@ -18,14 +22,33 @@ const FUNC_DECL_PATTERN = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b
 const ARROW_DECL_PATTERN = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$]\w*\s*=\s*(?:async\s*)?\(/;
 const CONTROL_OPEN_PATTERN = /\b(?:if|for|while|switch|try|catch)\b[^{]*\{|\belse\s*\{/;
 const EMPTY_CATCH_FULL_PATTERN = /\bcatch\s*(?:\([^)]*\))?\s*\{\s*\}/g;
+const TEST_RUNNER_BRANCH_PATTERN =
+  /\bprocess\.env\.(?:VITEST|JEST_WORKER_ID)\b|\bprocess\.env\.NODE_ENV\s*===?\s*["']test["']/;
+const TEST_PATH_PATTERN =
+  /(?:^|[\\/])(?:tests?|__tests__)[\\/]|\.(?:test|spec)\.[a-z]+$/i;
 const REGEX_PRECEDING_CHARS = new Set(["", "(", "[", "{", ",", ":", ";", "=", "!", "&", "|", "?", "+", "-", "*", "%", "~", "^", "\n"]);
 const REGEX_PRECEDING_KEYWORDS = new Set(["return", "case", "throw", "in", "of", "typeof", "void", "delete", "new", "yield", "await"]);
 
-function main() {
+async function main() {
   const options = parseCliArgs(process.argv.slice(2));
   if (!options) {
-    process.stderr.write("Usage: node check_ts.mjs [--json] <path> [...]\n");
+    process.stderr.write(
+      "Usage: node check_ts.mjs [--json] [--backend=auto|ast|heuristic] [--show-backend] [--fix] [--dry-run] <path> [...]\n",
+    );
     return 2;
+  }
+  const tsMod = options.backend === "heuristic" ? null : await loadTypeScript();
+  if (options.backend === "ast" && !tsMod) {
+    process.stderr.write("Error: --backend=ast requested, but 'typescript' package is not installed.\n");
+    return 2;
+  }
+  if (options.applyFix && !tsMod) {
+    process.stderr.write("Error: --fix requires the optional 'typescript' AST backend (heuristic mode cannot safely rewrite source).\n");
+    return 2;
+  }
+  const activeBackend = tsMod ? "ast" : "heuristic";
+  if (options.showBackend) {
+    process.stderr.write(`backend: ${activeBackend}\n`);
   }
   const collected = collectTargetFiles(options.paths);
   if (collected.error) {
@@ -34,16 +57,101 @@ function main() {
   }
   const allViolations = [];
   for (const filePath of collected.files) {
-    try {
-      const source = fs.readFileSync(filePath, "utf8");
-      allViolations.push(...checkSource(source, filePath));
-    } catch (err) {
-      process.stderr.write(`Error reading ${filePath}: ${err.message}\n`);
+    const outcome = processTargetFile(filePath, options, tsMod);
+    if (outcome.error) {
+      process.stderr.write(`${outcome.error}\n`);
       return 2;
     }
+    allViolations.push(...outcome.violations);
   }
-  emitViolations(allViolations, options.asJson);
+  if (!options.dryRun) {
+    emitViolations(allViolations, options.asJson);
+  }
   return allViolations.length > 0 ? 1 : 0;
+}
+
+function processTargetFile(filePath, options, tsMod) {
+  let source;
+  try {
+    source = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    return { violations: [], error: `Error reading ${filePath}: ${err.message}` };
+  }
+  if (options.applyFix && tsMod) {
+    const fixed = fixSourceWithAst(source, filePath, tsMod);
+    if (fixed.refusal) {
+      process.stderr.write(`${filePath}: ${fixed.refusal}\n`);
+    } else if (fixed.source !== source && options.dryRun) {
+      process.stdout.write(`--- a/${filePath}\n+++ b/${filePath}\n${fixed.source}`);
+      return { violations: [], error: null };
+    } else if (fixed.source !== source) {
+      fs.writeFileSync(filePath, fixed.source, "utf8");
+      source = fixed.source;
+    }
+  }
+  const violations = tsMod ? checkSourceWithAst(source, filePath, tsMod) : checkSource(source, filePath);
+  return { violations, error: null };
+}
+
+export async function loadTypeScript() {
+  try {
+    const loaded = await import("typescript");
+    return loaded.default ?? loaded;
+  } catch {
+    return null;
+  }
+}
+
+export function checkSourceWithAst(source, filePath, tsMod) {
+  const { comments } = lexSource(source);
+  const { directives, ignoreViolations } = parseIgnoreDirectives(comments, filePath);
+  const sf = tsMod.createSourceFile(filePath, source, tsMod.ScriptTarget.Latest, true);
+  const topFunctions = collectTopLevelAstFunctions(sf, tsMod);
+  const rawViolations = [
+    ...checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath),
+    ...checkAstFunctionRules(topFunctions, sf, tsMod, filePath),
+    ...checkTestRunnerBranching(source, filePath),
+  ];
+  const spans = topFunctions.map((entry) => ({ startLine: entry.startLine, endLine: entry.endLine }));
+  const kept = filterSuppressed(rawViolations, spans, directives);
+  return [...ignoreViolations, ...kept].sort(
+    (left, right) => left.line - right.line || left.rule.localeCompare(right.rule),
+  );
+}
+
+export function fixSourceWithAst(source, filePath, tsMod) {
+  const sf = tsMod.createSourceFile(filePath, source, tsMod.ScriptTarget.Latest, true);
+  const fnPositions = [];
+  for (let idx = 0; idx < sf.statements.length; idx += 1) {
+    const stmt = sf.statements[idx];
+    if (tsMod.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
+      fnPositions.push({ idx, stmt, name: stmt.name.text });
+    }
+  }
+  if (fnPositions.length < 2) {
+    return { source, refusal: null };
+  }
+  const firstPos = fnPositions[0].idx;
+  const lastPos = fnPositions[fnPositions.length - 1].idx;
+  if (lastPos - firstPos + 1 !== fnPositions.length) {
+    return { source, refusal: "Refused --fix: interleaved statements or non-hoisted declarations between top-level functions." };
+  }
+  const nameSet = new Set(fnPositions.map((entry) => entry.name));
+  const callGraph = new Map(fnPositions.map((entry) => [entry.name, collectAstCalls(entry.stmt, nameSet, tsMod)]));
+  const ordered = topoSortAstFunctions(fnPositions, callGraph);
+  if (!ordered) {
+    return { source, refusal: "Refused --fix: cyclic/mutual recursion detected in local call graph." };
+  }
+  const isAlreadySorted = ordered.every((value, idx) => value === idx);
+  if (isAlreadySorted) {
+    return { source, refusal: null };
+  }
+  const prefix = source.slice(0, fnPositions[0].stmt.getFullStart());
+  const suffix = source.slice(fnPositions[fnPositions.length - 1].stmt.getEnd());
+  const blocks = ordered.map((idx) => source.slice(fnPositions[idx].stmt.getFullStart(), fnPositions[idx].stmt.getEnd()).trim());
+  const prefixTrim = prefix.trimEnd();
+  const lead = prefixTrim ? `${prefixTrim}\n\n` : "";
+  return { source: `${lead}${blocks.join("\n\n")}${suffix || "\n"}`, refusal: null };
 }
 
 export function checkSource(source, filePath) {
@@ -54,6 +162,7 @@ export function checkSource(source, filePath) {
   const rawViolations = [
     ...checkFunctionBlocks(functions, lines, filePath),
     ...checkTernariesAndEmptyCatches(cleaned, lines, filePath),
+    ...checkTestRunnerBranching(source, filePath),
   ];
   const kept = filterSuppressed(rawViolations, functions, directives);
   return [...ignoreViolations, ...kept].sort(
@@ -111,20 +220,54 @@ function checkTernariesAndEmptyCatches(cleaned, lines, filePath) {
   return violations;
 }
 
+function checkTestRunnerBranching(source, filePath) {
+  if (TEST_PATH_PATTERN.test(filePath)) {
+    return [];
+  }
+  const violations = [];
+  const rawLines = source.split(/\r?\n/);
+  for (let idx = 0; idx < rawLines.length; idx += 1) {
+    if (TEST_RUNNER_BRANCH_PATTERN.test(rawLines[idx]) && !rawLines[idx].trim().startsWith("//")) {
+      violations.push({
+        path: filePath,
+        line: idx + 1,
+        rule: "LLM-07",
+        message: "Test-runner env branching in production code -> inject test behavior via explicit L0 parameters.",
+      });
+    }
+  }
+  return violations;
+}
+
 function parseCliArgs(rawArgs) {
   let asJson = false;
+  let applyFix = false;
+  let dryRun = false;
+  let showBackend = false;
+  let backend = "auto";
   const paths = [];
   for (const token of rawArgs) {
     if (token === "--json") {
       asJson = true;
-      continue;
-    }
-    if (token.startsWith("-")) {
+    } else if (token === "--fix") {
+      applyFix = true;
+    } else if (token === "--dry-run") {
+      dryRun = true;
+    } else if (token === "--show-backend") {
+      showBackend = true;
+    } else if (token.startsWith("--backend=")) {
+      const value = token.slice("--backend=".length);
+      if (!["auto", "ast", "heuristic"].includes(value)) {
+        return null;
+      }
+      backend = value;
+    } else if (token.startsWith("-")) {
       return null;
+    } else {
+      paths.push(token);
     }
-    paths.push(token);
   }
-  return paths.length > 0 ? { paths, asJson } : null;
+  return paths.length > 0 ? { paths, asJson, applyFix, dryRun, showBackend, backend } : null;
 }
 
 function collectTargetFiles(rawPaths) {
@@ -491,8 +634,197 @@ function countChar(text, target) {
   return count;
 }
 
+function collectTopLevelAstFunctions(sf, tsMod) {
+  const functions = [];
+  for (const stmt of sf.statements) {
+    if (!tsMod.isFunctionDeclaration(stmt) || !stmt.name || !stmt.body) {
+      continue;
+    }
+    const startLine = sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1;
+    const endLine = sf.getLineAndCharacterOfPosition(stmt.getEnd()).line + 1;
+    functions.push({ name: stmt.name.text, node: stmt, startLine, endLine });
+  }
+  return functions;
+}
+
+function checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath) {
+  const violations = [];
+  const nameToLine = new Map(topFunctions.map((entry) => [entry.name, entry.startLine]));
+  const nameSet = new Set(nameToLine.keys());
+  const callGraph = new Map();
+  for (const entry of topFunctions) {
+    const callees = collectAstCalls(entry.node, nameSet, tsMod);
+    callGraph.set(entry.name, callees);
+    const outOfOrder = [...callees]
+      .sort()
+      .filter((callee) => callee !== entry.name && nameToLine.get(callee) < entry.startLine);
+    for (const callee of outOfOrder) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-01",
+        message: `'${entry.name}' calls '${callee}' defined above it -> move '${callee}' below '${entry.name}' for top-down order.`,
+      });
+    }
+  }
+  for (const entry of topFunctions) {
+    const { depth, leafCallsLocal } = computeAstChainDepth(entry.name, callGraph);
+    if (depth > MAX_BUSINESS_DEPTH + 1 || (depth === MAX_BUSINESS_DEPTH + 1 && leafCallsLocal)) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-01",
+        message: `'${entry.name}' reaches call depth ${depth} (max L0->L1->L2 + L3 leaf) -> flatten pass-through calls.`,
+      });
+    }
+  }
+  return violations;
+}
+
+function checkAstFunctionRules(topFunctions, sf, tsMod, filePath) {
+  const violations = [];
+  for (const entry of topFunctions) {
+    const length = entry.endLine - entry.startLine + 1;
+    if (length > MAX_FUNCTION_LINES) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-01",
+        message: `'${entry.name}' is ${length} lines (max ${MAX_FUNCTION_LINES}) -> extract a cohesive L1/L2 pure helper.`,
+      });
+    }
+    if (GAMING_NAME_PATTERN.test(entry.name)) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "LLM-05",
+        message: `Function '${entry.name}' looks like a rule-gaming split -> rename by domain responsibility.`,
+      });
+    }
+    if (entry.node.parameters.length > MAX_POSITIONAL_ARGS) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-03",
+        message: `'${entry.name}' has ${entry.node.parameters.length} params (max ${MAX_POSITIONAL_ARGS}) -> group extras into a destructured options object.`,
+      });
+    }
+    violations.push(...scanAstFunctionBody(entry, sf, tsMod, filePath));
+  }
+  return violations;
+}
+
+function scanAstFunctionBody(entry, sf, tsMod, filePath) {
+  const violations = [];
+  let maxNesting = 0;
+  const stack = [{ node: entry.node.body, depth: 0 }];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop();
+    const isControl =
+      tsMod.isIfStatement(node) ||
+      tsMod.isForStatement(node) ||
+      tsMod.isForInStatement(node) ||
+      tsMod.isForOfStatement(node) ||
+      tsMod.isWhileStatement(node) ||
+      tsMod.isSwitchStatement(node) ||
+      tsMod.isTryStatement(node);
+    const nextDepth = isControl ? depth + 1 : depth;
+    maxNesting = Math.max(maxNesting, nextDepth);
+    const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+    if (tsMod.isFunctionDeclaration(node) && node !== entry.node) {
+      violations.push({ path: filePath, line, rule: "CANON-05", message: "Nested function declaration is banned -> lift to module top level." });
+    } else if (tsMod.isConditionalExpression(node) && (tsMod.isConditionalExpression(node.whenTrue) || tsMod.isConditionalExpression(node.whenFalse))) {
+      violations.push({ path: filePath, line, rule: "CANON-05", message: "Nested ternary expression is banned -> replace with flat if/return guard clauses." });
+    } else if (tsMod.isCatchClause(node) && node.block.statements.length === 0) {
+      violations.push({ path: filePath, line, rule: "LLM-02", message: "Empty catch block silently swallows errors -> handle or propagate to L0." });
+    } else if (tsMod.isVariableDeclaration(node) && tsMod.isIdentifier(node.name) && (VAGUE_NOUNS.has(node.name.text) || (node.name.text.length === 1 && node.name.text !== "_"))) {
+      violations.push({ path: filePath, line, rule: "LLM-03", message: `Vague or single-char variable '${node.name.text}' -> use a descriptive domain noun.` });
+    }
+    node.forEachChild((child) => {
+      const childDepth = tsMod.isIfStatement(node) && child === node.elseStatement && tsMod.isIfStatement(child) ? depth : nextDepth;
+      stack.push({ node: child, depth: childDepth });
+    });
+  }
+  if (maxNesting > MAX_NESTING_DEPTH) {
+    violations.push({
+      path: filePath,
+      line: entry.startLine,
+      rule: "CANON-05",
+      message: `Control-flow nesting depth ${maxNesting} (max ${MAX_NESTING_DEPTH}) -> invert with early return/continue or extract an L2 predicate.`,
+    });
+  }
+  return violations;
+}
+
+function collectAstCalls(fnNode, nameSet, tsMod) {
+  const callees = new Set();
+  const stack = [fnNode.body];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+    if (tsMod.isCallExpression(current) && tsMod.isIdentifier(current.expression) && nameSet.has(current.expression.text)) {
+      callees.add(current.expression.text);
+    }
+    current.forEachChild((child) => stack.push(child));
+  }
+  return callees;
+}
+
+function computeAstChainDepth(startName, callGraph) {
+  let maxDepth = 0;
+  let leafCallsLocal = false;
+  const stack = [{ name: startName, depth: 0, visited: new Set([startName]) }];
+  while (stack.length > 0) {
+    const { name, depth, visited } = stack.pop();
+    const next = callGraph.get(name) ?? new Set();
+    if (depth > maxDepth) {
+      maxDepth = depth;
+      leafCallsLocal = next.size > 0;
+    } else if (depth === maxDepth && next.size > 0) {
+      leafCallsLocal = true;
+    }
+    const unvisited = [...next].filter((callee) => !visited.has(callee));
+    for (const callee of unvisited) {
+      const nextVisited = new Set(visited);
+      nextVisited.add(callee);
+      stack.push({ name: callee, depth: depth + 1, visited: nextVisited });
+    }
+  }
+  return { depth: maxDepth, leafCallsLocal };
+}
+
+function topoSortAstFunctions(fnPositions, callGraph) {
+  const nameToIdx = new Map(fnPositions.map((entry, idx) => [entry.name, idx]));
+  const inDegree = new Array(fnPositions.length).fill(0);
+  const edges = fnPositions.map(() => []);
+  for (let callerIdx = 0; callerIdx < fnPositions.length; callerIdx += 1) {
+    const calleeIndices = [...(callGraph.get(fnPositions[callerIdx].name) ?? [])]
+      .sort()
+      .map((calleeName) => nameToIdx.get(calleeName))
+      .filter((calleeIdx) => calleeIdx !== undefined && calleeIdx !== callerIdx);
+    for (const calleeIdx of calleeIndices) {
+      edges[callerIdx].push(calleeIdx);
+      inDegree[calleeIdx] += 1;
+    }
+  }
+  const ready = inDegree.map((deg, idx) => (deg === 0 ? idx : -1)).filter((idx) => idx >= 0);
+  const ordered = [];
+  while (ready.length > 0) {
+    ready.sort((left, right) => left - right);
+    const current = ready.shift();
+    ordered.push(current);
+    for (const neighbor of edges[current]) {
+      inDegree[neighbor] -= 1;
+    }
+    ready.push(...edges[current].filter((neighbor) => inDegree[neighbor] === 0));
+  }
+  return ordered.length === fnPositions.length ? ordered : null;
+}
+
 const isEntryPoint =
   process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (isEntryPoint) {
-  process.exit(main());
+  main().then((code) => process.exit(code));
 }

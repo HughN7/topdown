@@ -208,3 +208,79 @@ test("multi-line empty catch flags LLM-02 and non-nested ternaries/optional tupl
   assert.ok(checkSource(multilineEmptyCatch, "mc.ts").some((entry) => entry.rule === "LLM-02"));
   assert.deepEqual(checkSource(twoSingleTernaries, "ok.ts"), []);
 });
+
+test("test-runner branching flags LLM-07 in prod files and skips test files", async () => {
+  const { checkSource } = await import("../enforcement/check_ts.mjs");
+  const prod = [
+    "export function sendEmail(address: string): string {",
+    '  if (process.env.NODE_ENV === "test" || process.env.VITEST) {',
+    '    return "stub";',
+    "  }",
+    "  return address;",
+    "}",
+  ].join("\n");
+  assert.ok(checkSource(prod, "src/mailer.ts").some((entry) => entry.rule === "LLM-07"));
+  assert.deepEqual(checkSource(prod, "src/__tests__/mailer.test.ts"), []);
+});
+
+test("CLI supports --backend=heuristic, --show-backend, and refuses --fix without AST", () => {
+  const cleanFixture = path.join(rootDir, "examples", "fixtures", "ts_after.ts");
+  const heurProc = spawnSync(
+    process.execPath,
+    [checkerPath, "--backend=heuristic", "--show-backend", cleanFixture],
+    { encoding: "utf8" },
+  );
+  assert.equal(heurProc.status, 0, heurProc.stderr);
+  assert.match(heurProc.stderr, /backend:\s*heuristic/);
+
+  const fixHeurProc = spawnSync(
+    process.execPath,
+    [checkerPath, "--backend=heuristic", "--fix", cleanFixture],
+    { encoding: "utf8" },
+  );
+  assert.equal(fixHeurProc.status, 2);
+  assert.match(fixHeurProc.stderr, /AST|typescript/i);
+});
+
+test("optional AST backend exports checkSourceWithAst and fixSourceWithAst", async () => {
+  const mod = await import("../enforcement/check_ts.mjs");
+  assert.equal(typeof mod.checkSourceWithAst, "function");
+  assert.equal(typeof mod.fixSourceWithAst, "function");
+  assert.equal(typeof mod.loadTypeScript, "function");
+
+  const tsMod = await mod.loadTypeScript();
+  if (!tsMod) {
+    const cleanFixture = path.join(rootDir, "examples", "fixtures", "ts_after.ts");
+    const astProc = spawnSync(process.execPath, [checkerPath, "--backend=ast", cleanFixture], {
+      encoding: "utf8",
+    });
+    assert.equal(astProc.status, 2);
+    assert.match(astProc.stderr, /typescript/i);
+    return;
+  }
+
+  const outOfOrder = [
+    "// L3 Leaf",
+    "function formatUsd(amountCents: number): string {",
+    "  return `$${(amountCents / 100).toFixed(2)}`;",
+    "}",
+    "",
+    "export function renderTotal(amountCents: number): string {",
+    "  return formatUsd(amountCents);",
+    "}",
+  ].join("\n");
+  assert.ok(mod.checkSourceWithAst(outOfOrder, "sample.ts", tsMod).some((e) => e.rule === "CANON-01"));
+  const fixed = mod.fixSourceWithAst(outOfOrder, "sample.ts", tsMod);
+  assert.equal(fixed.refusal, null);
+  assert.ok(fixed.source.indexOf("function renderTotal") < fixed.source.indexOf("function formatUsd"));
+  assert.deepEqual(mod.checkSourceWithAst(fixed.source, "sample.ts", tsMod), []);
+});
+
+test("positive-witness TS idioms pass with 0 violations and 0 waivers", async () => {
+  const fs = await import("node:fs");
+  const { checkSource } = await import("../enforcement/check_ts.mjs");
+  const witnessPath = path.join(rootDir, "tests", "positive_witness", "ts_idioms.ts");
+  const source = fs.readFileSync(witnessPath, "utf8");
+  assert.ok(!source.includes("topdown-ignore"));
+  assert.deepEqual(checkSource(source, witnessPath), []);
+});
