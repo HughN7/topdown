@@ -211,6 +211,19 @@ class TestCheckPython(unittest.TestCase):
         self.assertEqual(check_python.check_source(good_loop, "sc3.py"), [])
         self.assertEqual(check_python.check_source(good_discard, "sc4.py"), [])
 
+    def test_anti_gaming_function_names_flag_llm05_and_messages_are_actionable(self) -> None:
+        import check_python
+
+        bad_part = "def process_part2(amount_cents: int) -> int:\n    return amount_cents + 1\n"
+        bad_helper = "def fee_helper(amount_cents: int) -> int:\n    return amount_cents + 1\n"
+        good_name = "def calculate_fee_cents(amount_cents: int) -> int:\n    return amount_cents + 1\n"
+        part_violations = check_python.check_source(bad_part, "ag1.py")
+        helper_violations = check_python.check_source(bad_helper, "ag2.py")
+        self.assertIn("LLM-05", [v.rule for v in part_violations])
+        self.assertIn("LLM-05", [v.rule for v in helper_violations])
+        self.assertIn("->", part_violations[0].message)
+        self.assertEqual(check_python.check_source(good_name, "ag3.py"), [])
+
     def test_topdown_ignore_suppresses_with_reason_and_flags_without(self) -> None:
         import check_python
 

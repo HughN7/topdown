@@ -26,7 +26,24 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 | **Core** | [`core/base.md`](core/base.md) | 14 language-agnostic rules (`CANON-01..08`, `LLM-01..06`): top-down `L0→L3` order, I/O shell / pure core, 60–80 line cap, max nesting depth 2, explicit types, human-gated overrides. |
 | **Languages** | [`languages/`](languages/) | Idiom mappings + runnable linter configs. Ships with [Python](languages/python.md), [TypeScript/JS](languages/typescript.md), [Rust](languages/rust.md), and [Swift](languages/swift.md); extensible to any language. |
 | **Zones** | [`zones/`](zones/) | Optional directory-scoped rule overrides—either **relaxing** rules where framework/systems mechanics require it ([`frontend-ui.md`](zones/frontend-ui.md), [`svelte-state.md`](zones/svelte-state.md), [`systems-hotpath.md`](zones/systems-hotpath.md)) or **tightening** them for high-stakes paths ([`security-critical.md`](zones/security-critical.md)). |
-| **Enforcement** | [`enforcement/`](enforcement/) | Zero-dependency checkers (`check_python.py` full AST; `check_ts.mjs` and `check_rust.py` scoped heuristics) + PR escape-hatch workflow. |
+| **Enforcement** | [`enforcement/`](enforcement/) | Zero-dependency checkers (`check_python.py` full AST; `check_ts.mjs` and `check_rust.py` scoped heuristics), `run_hook.py` (`PostToolUse` dispatcher), and PR escape-hatch workflow. |
+
+### Optional: Auto-Check on Every Edit (`PostToolUse` Hook)
+
+Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Gemini CLI so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "python3 enforcement/run_hook.py" }]
+      }
+    ]
+  }
+}
+```
 
 ---
 
@@ -132,7 +149,7 @@ Runs the checkers against the example pairs in [`examples/fixtures/`](examples/f
 ```bash
 python3 -m unittest discover -s tests -p "test_*.py" -v
 node --test tests/test_check_ts.mjs
-python3 enforcement/check_python.py enforcement/check_python.py enforcement/check_rust.py examples/verify_examples.py
+python3 enforcement/check_python.py enforcement/check_python.py enforcement/check_rust.py enforcement/run_hook.py examples/verify_examples.py
 node enforcement/check_ts.mjs enforcement/check_ts.mjs
 python3 examples/verify_examples.py
 ```

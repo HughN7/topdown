@@ -10,6 +10,7 @@
 | `CANON-04` | Prefer `@dataclass(frozen=True)`, `tuple`, and `frozenset` over mutating caller lists/dicts. |
 | `CANON-05` | Use guard clauses and exhaustive `match` statements; ban nested `def` / `async def` and nested conditional expressions (`a if x else (b if y else c)`). |
 | `LLM-02` | Ban bare `except:` and broad `except Exception: pass` / `return None` inside pure logic. |
+| `LLM-06` | Catch dead code with `vulture src/ --min-confidence 80`. |
 | `CANON-08` | `# topdown-ignore(CANON-05, reason="...")` on the `def` line, preceding line, or target line. |
 
 ## 2. Standard Linter Config (`pyproject.toml` — Ruff)

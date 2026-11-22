@@ -10,6 +10,7 @@
 | `CANON-04` | Mark fields `readonly` / `readonly T[]`; return new arrays/objects instead of mutating arguments. |
 | `CANON-05` | Early returns over nested `if`; ban nested `function` declarations and nested ternaries (`no-nested-ternary`). Single-line `.map()` / `.filter()` callbacks are allowed. |
 | `LLM-02` | Ban empty `catch {}` blocks or silent fallback returns inside pure logic. |
+| `LLM-06` | Catch unused exports and dead files with `npx knip`. |
 | `CANON-08` | `// topdown-ignore(CANON-05, reason="...")` on the function line, preceding line, or target line. |
 
 ## 2. Standard Linter Config (`eslint.config.js` — Flat Config)

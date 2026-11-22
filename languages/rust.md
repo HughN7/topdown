@@ -20,7 +20,7 @@ too-many-arguments-threshold = 4
 too-many-lines-threshold = 80
 ```
 
-Enable in `Cargo.toml` or crate root: `#![deny(clippy::unwrap_used)]`.
+Enable in `Cargo.toml` or crate root: `#![deny(clippy::unwrap_used, dead_code)]`.
 
 ## 3. Structural Checker
 

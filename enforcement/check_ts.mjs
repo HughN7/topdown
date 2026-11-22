@@ -70,7 +70,7 @@ function checkFunctionBlocks(functions, lines, filePath) {
         path: filePath,
         line: fnSpan.startLine,
         rule: "CANON-01",
-        message: `Function starting at line ${fnSpan.startLine} is ${length} lines (max ${MAX_FUNCTION_LINES}).`,
+        message: `Function starting at line ${fnSpan.startLine} is ${length} lines (max ${MAX_FUNCTION_LINES}) -> extract a cohesive L1/L2 pure helper.`,
       });
     }
     const maxNesting = measureControlNesting(lines, fnSpan.bodyStartLine, fnSpan.endLine);
@@ -79,7 +79,7 @@ function checkFunctionBlocks(functions, lines, filePath) {
         path: filePath,
         line: fnSpan.startLine,
         rule: "CANON-05",
-        message: `Function has control-flow nesting depth ${maxNesting} (max ${MAX_NESTING_DEPTH}).`,
+        message: `Control-flow nesting depth ${maxNesting} (max ${MAX_NESTING_DEPTH}) -> invert with early return/continue or extract an L2 predicate.`,
       });
     }
     violations.push(...findNestedFunctions(lines, fnSpan.bodyStartLine, fnSpan.endLine, filePath));
@@ -95,7 +95,7 @@ function checkTernariesAndEmptyCatches(cleaned, lines, filePath) {
       path: filePath,
       line: lineNo,
       rule: "LLM-02",
-      message: "Empty catch block silently swallows errors.",
+      message: "Empty catch block silently swallows errors -> narrow and handle the error or propagate to L0.",
     });
   }
   for (let idx = 0; idx < lines.length; idx += 1) {
@@ -104,7 +104,7 @@ function checkTernariesAndEmptyCatches(cleaned, lines, filePath) {
         path: filePath,
         line: idx + 1,
         rule: "CANON-05",
-        message: "Nested ternary expression is banned.",
+        message: "Nested ternary expression is banned -> replace with flat if/return guard clauses.",
       });
     }
   }

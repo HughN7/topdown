@@ -90,12 +90,22 @@ def check_fn_spans(fn_spans: list[FnSpan], lines: list[str], file_path: str) -> 
         line_count = span.end_line - span.start_line + 1
         if line_count > MAX_FUNCTION_LINES:
             violations.append(
-                Violation(file_path, span.start_line, "CANON-01", f"Function starting at line {span.start_line} is {line_count} lines (max {MAX_FUNCTION_LINES}).")
+                Violation(
+                    file_path,
+                    span.start_line,
+                    "CANON-01",
+                    f"Function starting at line {span.start_line} is {line_count} lines (max {MAX_FUNCTION_LINES}) -> extract a cohesive L1/L2 pure helper.",
+                )
             )
         max_nesting = measure_control_nesting(lines, span.body_start_line, span.end_line)
         if max_nesting > MAX_NESTING_DEPTH:
             violations.append(
-                Violation(file_path, span.start_line, "CANON-05", f"Function has control-flow nesting depth {max_nesting} (max {MAX_NESTING_DEPTH}).")
+                Violation(
+                    file_path,
+                    span.start_line,
+                    "CANON-05",
+                    f"Control-flow nesting depth {max_nesting} (max {MAX_NESTING_DEPTH}) -> use early return / '?' propagation or extract an L2 helper.",
+                )
             )
         nested_lines = [
             line_no
@@ -103,7 +113,12 @@ def check_fn_spans(fn_spans: list[FnSpan], lines: list[str], file_path: str) -> 
             if NESTED_FN_PATTERN.search(lines[line_no - 1])
         ]
         violations.extend(
-            Violation(file_path, line_no, "CANON-05", "Nested fn declaration inside a function is banned.")
+            Violation(
+                file_path,
+                line_no,
+                "CANON-05",
+                "Nested fn declaration inside a function is banned -> lift to module top level.",
+            )
             for line_no in nested_lines
         )
     return violations
@@ -111,7 +126,12 @@ def check_fn_spans(fn_spans: list[FnSpan], lines: list[str], file_path: str) -> 
 
 def check_unwrap_calls(lines: list[str], file_path: str) -> list[Violation]:
     return [
-        Violation(file_path, idx + 1, "LLM-02", "Avoid .unwrap() / .unwrap_or_default() in non-test code.")
+        Violation(
+            file_path,
+            idx + 1,
+            "LLM-02",
+            "Avoid .unwrap() / .unwrap_or_default() in non-test code -> propagate with '?' or match explicitly.",
+        )
         for idx, line_text in enumerate(lines)
         if UNWRAP_PATTERN.search(line_text)
     ]

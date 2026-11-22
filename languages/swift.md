@@ -10,6 +10,7 @@
 | `CANON-04` | Prefer `struct` value types and `let` properties; avoid `inout` and mutating `class` state outside `zones/systems-hotpath.md`. |
 | `CANON-05` | Use `guard ... else { return }` early exits and exhaustive `switch`; ban nested `func` declarations and nested ternaries. *(For SwiftUI `View` closures, apply `zones/frontend-ui.md` to `Views/` while keeping `Domain/` strict.)* |
 | `LLM-02` | Ban force-unwrapping (`!`), `try!`, and silent `try?` / `catch {}` error swallowing in non-test code. |
+| `LLM-06` | Catch unused declarations with `periphery scan`. |
 | `CANON-08` | `// topdown-ignore(CANON-05, reason="...")` on the `func` line, preceding line, or target line. |
 
 ## 2. Standard Linter Config (`.swiftlint.yml` — SwiftLint)

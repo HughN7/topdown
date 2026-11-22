@@ -17,6 +17,7 @@ MAX_TOTAL_ARGS = 6
 MAX_NESTING_DEPTH = 2
 MAX_BUSINESS_DEPTH = 2
 VAGUE_NOUNS = frozenset({"data", "info", "item", "temp", "result", "handler"})
+GAMING_NAME_PATTERN = re.compile(r"(?:_part\d+|_helper\d*)$", re.IGNORECASE)
 IGNORE_PATTERN = re.compile(r"#\s*topdown-ignore(?:\((.*)\))?")
 REASON_PATTERN = re.compile(r"""reason\s*=\s*(?:"([^"]+)"|'([^']+)')""")
 RULE_ID_PATTERN = re.compile(r"\b(?:CANON|LLM)-\d{2}\b")
@@ -118,7 +119,10 @@ def check_order_and_depth(
                 path=file_path,
                 line=fn_node.lineno,
                 rule="CANON-01",
-                message=f"'{fn_node.name}' calls '{callee}' defined above it (line {fn_lines[callee]}).",
+                message=(
+                    f"'{fn_node.name}' calls '{callee}' defined above it (line {fn_lines[callee]}) "
+                    f"-> move '{callee}' below '{fn_node.name}' for top-down order."
+                ),
             )
             for callee in out_of_order
         )
@@ -133,7 +137,10 @@ def check_order_and_depth(
                     path=file_path,
                     line=fn_node.lineno,
                     rule="CANON-01",
-                    message=f"'{fn_node.name}' exceeds L0->L1->L2 + L3 leaf call-depth ceiling (depth {depth}).",
+                    message=(
+                        f"'{fn_node.name}' reaches call depth {depth} (max L0->L1->L2 + L3 leaf) "
+                        "-> flatten pass-through calls or inline trivial helpers."
+                    ),
                 )
             )
     return violations
@@ -144,24 +151,53 @@ def check_function_rules(
     file_path: str,
 ) -> list[Violation]:
     violations: list[Violation] = []
+    if GAMING_NAME_PATTERN.search(fn_node.name):
+        violations.append(
+            Violation(
+                file_path,
+                fn_node.lineno,
+                "LLM-05",
+                f"Function '{fn_node.name}' looks like a rule-gaming split -> rename by domain responsibility or inline.",
+            )
+        )
     line_count = (fn_node.end_lineno or fn_node.lineno) - fn_node.lineno + 1
     if line_count > MAX_FUNCTION_LINES:
         violations.append(
-            Violation(file_path, fn_node.lineno, "CANON-01", f"'{fn_node.name}' is {line_count} lines (max {MAX_FUNCTION_LINES}).")
+            Violation(
+                file_path,
+                fn_node.lineno,
+                "CANON-01",
+                f"'{fn_node.name}' is {line_count} lines (max {MAX_FUNCTION_LINES}) -> extract a cohesive L1/L2 pure helper.",
+            )
         )
     pos_count, total_count = count_parameters(fn_node)
     if pos_count > MAX_POSITIONAL_ARGS:
         violations.append(
-            Violation(file_path, fn_node.lineno, "CANON-03", f"'{fn_node.name}' has {pos_count} positional args (max {MAX_POSITIONAL_ARGS}).")
+            Violation(
+                file_path,
+                fn_node.lineno,
+                "CANON-03",
+                f"'{fn_node.name}' has {pos_count} positional args (max {MAX_POSITIONAL_ARGS}) -> make extras keyword-only with '*'.",
+            )
         )
     if total_count > MAX_TOTAL_ARGS:
         violations.append(
-            Violation(file_path, fn_node.lineno, "CANON-03", f"'{fn_node.name}' has {total_count} total args (max {MAX_TOTAL_ARGS}).")
+            Violation(
+                file_path,
+                fn_node.lineno,
+                "CANON-03",
+                f"'{fn_node.name}' has {total_count} total args (max {MAX_TOTAL_ARGS}) -> group related inputs into a frozen dataclass.",
+            )
         )
     nesting = measure_max_nesting(fn_node)
     if nesting > MAX_NESTING_DEPTH:
         violations.append(
-            Violation(file_path, fn_node.lineno, "CANON-05", f"'{fn_node.name}' has nesting depth {nesting} (max {MAX_NESTING_DEPTH}).")
+            Violation(
+                file_path,
+                fn_node.lineno,
+                "CANON-05",
+                f"'{fn_node.name}' has nesting depth {nesting} (max {MAX_NESTING_DEPTH}) -> invert conditions with early return/continue or extract an L2 predicate.",
+            )
         )
     violations.extend(scan_body_violations(fn_node, file_path))
     return violations
@@ -331,15 +367,36 @@ def scan_body_violations(
         if node is fn_node:
             continue
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            violations.append(Violation(file_path, node.lineno, "CANON-05", f"Nested function '{node.name}' is banned."))
+            violations.append(
+                Violation(
+                    file_path,
+                    node.lineno,
+                    "CANON-05",
+                    f"Nested function '{node.name}' is banned -> lift to module top level as an L2/L3 helper.",
+                )
+            )
             continue
         if isinstance(node, ast.IfExp) and (isinstance(node.body, ast.IfExp) or isinstance(node.orelse, ast.IfExp)):
-            violations.append(Violation(file_path, node.lineno, "CANON-05", "Nested inline conditional expression is banned."))
+            violations.append(
+                Violation(
+                    file_path,
+                    node.lineno,
+                    "CANON-05",
+                    "Nested inline conditional expression is banned -> replace with flat if/return guard clauses.",
+                )
+            )
             continue
         is_single_char = isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and len(node.id) == 1 and node.id != "_"
         is_vague_var = isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in VAGUE_NOUNS and id(node) not in comp_target_ids
         if is_single_char or is_vague_var:
-            violations.append(Violation(file_path, node.lineno, "LLM-03", f"Vague or single-char variable name '{node.id}'."))
+            violations.append(
+                Violation(
+                    file_path,
+                    node.lineno,
+                    "LLM-03",
+                    f"Vague or single-char variable name '{node.id}' -> use a descriptive domain noun.",
+                )
+            )
             continue
         if not isinstance(node, ast.ExceptHandler):
             continue
@@ -351,7 +408,14 @@ def scan_body_violations(
             or (isinstance(only_stmt.value, (ast.List, ast.Dict, ast.Tuple)) and not getattr(only_stmt.value, "elts", getattr(only_stmt.value, "keys", [])))
         )
         if is_broad and (isinstance(only_stmt, ast.Pass) or is_empty_return):
-            violations.append(Violation(file_path, node.lineno, "LLM-02", "Broad exception handler silently swallows errors."))
+            violations.append(
+                Violation(
+                    file_path,
+                    node.lineno,
+                    "LLM-02",
+                    "Broad exception handler silently swallows errors -> catch a specific exception or propagate to L0.",
+                )
+            )
     return violations
 
 
