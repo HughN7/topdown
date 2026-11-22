@@ -30,15 +30,16 @@ def main() -> int:
     except ImportError as exc:
         print(f"Missing optional engine dependency: {exc}. Install with `pip install -e .`.", file=sys.stderr)
         return 2
-    target_files, file_error = collect_supported_files(options.paths)
-    if file_error is not None:
-        print(file_error, file=sys.stderr)
-        return 2
     first_target = Path(options.paths[0]).resolve()
     config_root = first_target if first_target.is_dir() else first_target.parent
     boundary_cfg, cfg_error = load_boundary_config(config_root, options.config_path)
     if cfg_error is not None:
         print(cfg_error, file=sys.stderr)
+        return 2
+    exclude_dirs = boundary_cfg.exclude_dirs if boundary_cfg is not None else ()
+    target_files, file_error = collect_supported_files(options.paths, exclude_dirs=exclude_dirs)
+    if file_error is not None:
+        print(file_error, file=sys.stderr)
         return 2
     all_violations: list[Violation] = []
     for file_path in target_files:
@@ -78,7 +79,12 @@ def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
     return EngineOptions(paths=tuple(paths), as_json=as_json, config_path=config_path)
 
 
-def collect_supported_files(raw_paths: tuple[str, ...]) -> tuple[list[Path], str | None]:
+def collect_supported_files(
+    raw_paths: tuple[str, ...],
+    *,
+    exclude_dirs: tuple[str, ...] = (),
+) -> tuple[list[Path], str | None]:
+    skip_names = SKIP_DIRS | frozenset(exclude_dirs)
     collected: list[Path] = []
     for raw_entry in raw_paths:
         target = Path(raw_entry)
@@ -92,7 +98,7 @@ def collect_supported_files(raw_paths: tuple[str, ...]) -> tuple[list[Path], str
             for path in sorted(target.rglob("*"))
             if path.is_file()
             and spec_for_path(path) is not None
-            and not any(part in SKIP_DIRS for part in path.parts)
+            and not any(part in skip_names for part in path.parts)
         ]
         collected.extend(found)
     return collected, None

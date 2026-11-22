@@ -26,6 +26,7 @@ class BoundaryConfig:
     shell_dirs: tuple[str, ...]
     extra_io_imports: tuple[str, ...]
     use_default_io_imports: bool
+    exclude_dirs: tuple[str, ...] = ()
 
 
 def load_boundary_config(root_dir: Path, explicit_config: Path | None) -> tuple[BoundaryConfig | None, str | None]:
@@ -38,21 +39,21 @@ def load_boundary_config(root_dir: Path, explicit_config: Path | None) -> tuple[
         raw_table = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         return None, f"Invalid config {config_path}: {exc}"
-    section = raw_table.get("boundaries")
-    if not isinstance(section, dict):
-        return None, None
+    section = raw_table.get("boundaries") if isinstance(raw_table.get("boundaries"), dict) else {}
+    raw_excludes = raw_table.get("exclude_dirs", section.get("exclude_dirs", []))
+    exclude_dirs = tuple(normalize_rel_dir(entry) for entry in raw_excludes if isinstance(entry, str))
     pure_dirs = tuple(normalize_rel_dir(entry) for entry in section.get("pure_dirs", []) if isinstance(entry, str))
-    if not pure_dirs:
+    if not pure_dirs and not exclude_dirs:
         return None, None
     shell_dirs = tuple(normalize_rel_dir(entry) for entry in section.get("shell_dirs", []) if isinstance(entry, str))
     extra_io = tuple(entry for entry in section.get("extra_io_imports", []) if isinstance(entry, str))
     use_defaults = bool(section.get("use_default_io_imports", True))
-    return BoundaryConfig(config_path.parent.resolve(), pure_dirs, shell_dirs, extra_io, use_defaults), None
+    return BoundaryConfig(config_path.parent.resolve(), pure_dirs, shell_dirs, extra_io, use_defaults, exclude_dirs), None
 
 
 def check_file_boundaries(source: str, file_path: Path, config: BoundaryConfig) -> list[Violation]:
     spec = spec_for_path(file_path)
-    if spec is None or not is_inside_dirs(file_path, config.root_dir, config.pure_dirs):
+    if spec is None or not config.pure_dirs or not is_inside_dirs(file_path, config.root_dir, config.pure_dirs):
         return []
     imports = extract_imports(source, spec)
     banned_io = (spec.default_io_imports if config.use_default_io_imports else ()) + config.extra_io_imports

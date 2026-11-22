@@ -185,6 +185,29 @@ class TestUniversalEngine(unittest.TestCase):
             self.assertEqual(len(canon02), 3)
             self.assertTrue(all("pricing.py" in entry["path"] for entry in canon02))
 
+    def test_exclude_dirs_in_topdown_toml_skips_generated_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "topdown.toml").write_text(
+                'exclude_dirs = ["generated"]\n',
+                encoding="utf-8",
+            )
+            gen_file = root / "generated" / "schema.py"
+            gen_file.parent.mkdir(parents=True)
+            gen_file.write_text(
+                "def leaf(amount_cents: int) -> int:\n    return amount_cents\n\n"
+                "def caller(amount_cents: int) -> int:\n    return leaf(amount_cents)\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [sys.executable, "-m", "engine.cli", "--json", str(root)],
+                cwd=str(ROOT_DIR),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr + proc.stdout)
+            self.assertEqual(json.loads(proc.stdout), [])
+
 
 if __name__ == "__main__":
     unittest.main()

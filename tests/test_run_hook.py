@@ -67,6 +67,29 @@ class TestRunHook(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0)
 
+    def test_swift_file_dispatches_to_engine_when_installed(self) -> None:
+        import importlib.util
+
+        if importlib.util.find_spec("tree_sitter_language_pack") is None:
+            self.skipTest("Optional tree-sitter engine not installed")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bad_swift = Path(tmp_dir) / "sample.swift"
+            bad_swift.write_text(
+                "func applyFee(amountCents: Int) -> Int { return amountCents - 50 }\n\n"
+                "func orchestrate(amountCents: Int) -> Int { return applyFee(amountCents: amountCents) }\n",
+                encoding="utf-8",
+            )
+            payload = json.dumps({"tool_input": {"file_path": str(bad_swift)}})
+            proc = subprocess.run(
+                [sys.executable, str(HOOK_SCRIPT)],
+                input=payload,
+                cwd=tmp_dir,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("CANON-01", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

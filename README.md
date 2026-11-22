@@ -52,6 +52,8 @@ topdown --config topdown.toml src/    # Adds opt-in cross-file CANON-02 I/O boun
 Topdown **never assumes directory names** (`core/`, `domain/`, etc.) on external repos. Cross-file `CANON-02` checks run *only* when you explicitly declare `pure_dirs` in `topdown.toml`:
 
 ```toml
+exclude_dirs = [".svelte-kit", "migrations"]   # optional: skip generated code
+
 [boundaries]
 pure_dirs = ["src/domain"]        # required to enable cross-file CANON-02 checks
 shell_dirs = ["src/adapters"]     # optional: pure_dirs cannot import from shell_dirs

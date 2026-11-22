@@ -6,14 +6,18 @@ Topdown checker, and exits 2 with actionable refactor guidance on stderr if viol
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ENFORCEMENT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = ENFORCEMENT_DIR.parent
 TS_EXTENSIONS = frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"})
+ENGINE_EXTENSIONS = frozenset({".swift", ".go"})
 
 
 def main() -> int:
@@ -24,7 +28,8 @@ def main() -> int:
     command = build_checker_command(target_path)
     if not command:
         return 0
-    proc = subprocess.run(command, capture_output=True, text=True, check=False)
+    env = build_subprocess_env()
+    proc = subprocess.run(command, capture_output=True, text=True, env=env, check=False)
     if proc.returncode == 0:
         return 0
     output = (proc.stdout + proc.stderr).strip()
@@ -65,7 +70,17 @@ def build_checker_command(target_path: Path) -> tuple[str, ...]:
         if node_bin is None:
             return ()
         return (node_bin, str(ENFORCEMENT_DIR / "check_ts.mjs"), str(target_path))
+    if suffix in ENGINE_EXTENSIONS and importlib.util.find_spec("tree_sitter_language_pack") is not None:
+        return (sys.executable, "-m", "engine.cli", str(target_path))
     return ()
+
+
+def build_subprocess_env() -> dict[str, str]:
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    repo_str = str(REPO_ROOT)
+    env["PYTHONPATH"] = f"{repo_str}{os.pathsep}{existing}" if existing else repo_str
+    return env
 
 
 if __name__ == "__main__":
