@@ -21,7 +21,7 @@ const REASON_PATTERN = /reason\s*=\s*(?:"([^"]+)"|'([^']+)')/;
 const RULE_ID_PATTERN = /\b(?:CANON|LLM)-\d{2}\b/g;
 const FUNC_DECL_PATTERN = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b/;
 const ARROW_DECL_PATTERN = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$]\w*\s*=\s*(?:async\s*)?\(/;
-const CONTROL_OPEN_PATTERN = /\b(?:if|for|while|switch|try|catch)\b[^{]*\{|\belse\s*\{/;
+const CONTROL_OPEN_PATTERN = /\b(?:if|for|while|switch|try)\b[^{]*\{|(?<!\.)\bcatch\b[^{]*\{|\belse\s*\{/;
 const EMPTY_CATCH_FULL_PATTERN = /\bcatch\s*(?:\([^)]*\))?\s*\{\s*\}/g;
 const TEST_RUNNER_BRANCH_PATTERN =
   /\bprocess\.env\.(?:VITEST|JEST_WORKER_ID)\b|\bprocess\.env\.NODE_ENV\s*===?\s*["']test["']/;
@@ -171,10 +171,14 @@ function buildSafeTsFunctionSpans(fnPositions, sf, sourceLines) {
   for (let idx = 0; idx < fnPositions.length; idx += 1) {
     const startLine = sf.getLineAndCharacterOfPosition(fnPositions[idx].stmt.getStart(sf)).line;
     const prevEndLine = idx > 0 ? sf.getLineAndCharacterOfPosition(fnPositions[idx - 1].stmt.getEnd()).line + 1 : 0;
+    if (idx > 0 && startLine < prevEndLine) {
+      return null;
+    }
     let blockStartLine = startLine;
     while (
       blockStartLine > prevEndLine &&
       sourceLines[blockStartLine - 1].trim().startsWith("//") &&
+      !sourceLines[blockStartLine - 1].trim().startsWith("///") &&
       !(blockStartLine - 1 === 0 && /@ts-|eslint-disable|copyright|license/i.test(sourceLines[0]))
     ) {
       blockStartLine -= 1;
@@ -407,7 +411,7 @@ function lexSource(source, isJsx = false) {
       consumeTemplateLiteral(source, state);
       continue;
     }
-    if (ch === "/" && canStartRegex(state.lastToken)) {
+    if (ch === "/" && canStartRegex(state.lastToken, isJsx)) {
       consumeRegexLiteral(source, state);
       continue;
     }
@@ -534,6 +538,7 @@ function consumeRegexLiteral(source, state) {
     if (ch === "\n") {
       state.out += "\n";
       state.line += 1;
+      state.idx += 1;
       return;
     }
     state.idx += 1;
@@ -574,7 +579,10 @@ function readWordOrPunct(source, idx, ch) {
   return source.slice(start, idx + 1);
 }
 
-function canStartRegex(lastToken) {
+function canStartRegex(lastToken, isJsx = false) {
+  if (isJsx && lastToken === ">") {
+    return false;
+  }
   return REGEX_PRECEDING_CHARS.has(lastToken) || REGEX_PRECEDING_KEYWORDS.has(lastToken);
 }
 
@@ -593,18 +601,22 @@ function extractFunctions(lines) {
     const openParens = countChar(lines[idx], "(");
     const closeParens = countChar(lines[idx], ")");
     const isDeclStart = FUNC_DECL_PATTERN.test(trimmed) || ARROW_DECL_PATTERN.test(trimmed);
-    if (activeStart === -1 && pendingStart === -1) {
+    if (activeStart === -1 && braceDepth === 0 && isDeclStart) {
       parenDepth = 0;
-      pendingStart = braceDepth === 0 && isDeclStart ? idx + 1 : -1;
+      pendingStart = idx + 1;
+    } else if (activeStart === -1 && pendingStart === -1) {
+      parenDepth = 0;
     }
     parenDepth += openParens - closeParens;
-    if (pendingStart !== -1 && parenDepth <= 0 && opens > 0 && opens === closes) {
+    const opensBodyHere = pendingStart !== -1 && parenDepth <= 0 && opens > 0 && (opens > closes || trimmed.endsWith("{"));
+    const isSingleLineBody = pendingStart !== -1 && parenDepth <= 0 && opens > 0 && opens === closes && !trimmed.endsWith("{");
+    if (isSingleLineBody) {
       spans.push({ startLine: pendingStart, bodyStartLine: idx + 1, endLine: idx + 1 });
       pendingStart = -1;
-    } else if (pendingStart !== -1 && parenDepth <= 0 && opens > closes) {
+    } else if (opensBodyHere) {
       activeStart = pendingStart;
       activeBodyStart = idx + 1;
-      activeBaseDepth = braceDepth;
+      activeBaseDepth = braceDepth - (trimmed.startsWith("}") ? 1 : 0);
       pendingStart = -1;
     } else if (pendingStart !== -1 && parenDepth <= 0 && (trimmed.endsWith(";") || (opens === 0 && /=>\s*[^({\s]/.test(trimmed)))) {
       pendingStart = -1;
@@ -690,9 +702,9 @@ function hasNestedTernary(lineText) {
   const sanitized = lineText
     .replace(/\?\./g, "")
     .replace(/\?\?/g, "")
-    .replace(/\w\?\s*:/g, "")
+    .replace(/[\w}\]]\?\s*:/g, "")
     .replace(/\w\?\s*(?=[,)\]])/g, "");
-  return sanitized.split(",").some((segment) => countChar(segment, "?") >= 2);
+  return sanitized.split(/[,+]|}\s*\(/).some((segment) => countChar(segment, "?") >= 2);
 }
 
 function countChar(text, target) {

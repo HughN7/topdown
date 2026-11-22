@@ -299,10 +299,11 @@ def mask_cfg_test_lines(lines: list[str]) -> list[str]:
     pending_test_attr = False
     in_test_block = False
     test_brace_depth = 0
+    file_brace_depth = 0
     for line_text in lines:
         opens = line_text.count("{")
         closes = line_text.count("}")
-        has_cfg_test = bool(CFG_TEST_PATTERN.search(line_text))
+        has_cfg_test = file_brace_depth == 0 and bool(CFG_TEST_PATTERN.search(line_text))
         if has_cfg_test and opens > 0:
             test_brace_depth = opens - closes
             in_test_block = test_brace_depth > 0
@@ -330,6 +331,7 @@ def mask_cfg_test_lines(lines: list[str]) -> list[str]:
             pending_test_attr = not line_text.strip().endswith(";")
             masked.append("")
             continue
+        file_brace_depth += opens - closes
         masked.append(line_text)
     return masked
 
@@ -365,11 +367,14 @@ def measure_control_nesting(lines: list[str], body_start_line: int, end_line: in
     control_stack: list[int] = []
     brace_depth = 0
     max_nesting = 0
+    in_let_stmt = False
     for line_no in range(body_start_line, end_line + 1):
         line_text = lines[line_no - 1]
         trimmed = line_text.strip()
         leading_closes = len(trimmed) - len(trimmed.lstrip("}"))
-        is_let_else = bool(re.search(r"\blet\b.*\belse\s*\{", line_text))
+        if re.search(r"^\s*let\b", line_text):
+            in_let_stmt = True
+        is_let_else = in_let_stmt and bool(re.search(r"\belse\s*\{", line_text))
         is_match_guard = "=>" in line_text
         opens = line_text.count("{")
         closes = line_text.count("}")
@@ -382,6 +387,8 @@ def measure_control_nesting(lines: list[str], body_start_line: int, end_line: in
         brace_depth += opens - (closes - leading_closes)
         while control_stack and brace_depth <= control_stack[-1]:
             control_stack.pop()
+        if ";" in line_text:
+            in_let_stmt = False
     return max_nesting
 
 
