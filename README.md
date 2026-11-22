@@ -24,7 +24,7 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 | Layer | Path | Purpose |
 |---|---|---|
 | **Core** | [`core/base.md`](core/base.md) | 13 language-agnostic rules (`CANON-01..08`, `LLM-01..05`): top-down `L0→L3` order, I/O shell / pure core, 60–80 line cap, max nesting depth 2, explicit types, human-gated overrides. |
-| **Languages** | [`languages/`](languages/) | Idiom mappings + runnable linter configs. Ships with [Python](languages/python.md), [TypeScript/JS](languages/typescript.md), and [Rust](languages/rust.md); extensible to any language. |
+| **Languages** | [`languages/`](languages/) | Idiom mappings + runnable linter configs. Ships with [Python](languages/python.md), [TypeScript/JS](languages/typescript.md), [Rust](languages/rust.md), and [Swift](languages/swift.md); extensible to any language. |
 | **Zones** | [`zones/`](zones/) | Optional directory-scoped rule overrides—either **relaxing** rules where framework/systems mechanics require it ([`frontend-ui.md`](zones/frontend-ui.md), [`systems-hotpath.md`](zones/systems-hotpath.md)) or **tightening** them for high-stakes paths ([`security-critical.md`](zones/security-critical.md)). |
 | **Enforcement** | [`enforcement/`](enforcement/) | Zero-dependency checkers (`check_python.py` full AST; `check_ts.mjs` and `check_rust.py` scoped heuristics) + PR escape-hatch workflow. |
 
