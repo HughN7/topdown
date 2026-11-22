@@ -27,6 +27,6 @@ Every file reads top-down like a technical memo, separates I/O from pure busines
 |---|---|---|
 | **`LLM-01`** | **No Hollow Trampoline Wrappers** | Ban pass-through functions where `fn_a(x)` forwards `x` unchanged to `fn_b(x)` (Shape-Change Rule). A deeper call is valid only if it transforms types, fans out across helpers, or crosses an I/O boundary. |
 | **`LLM-02`** | **No Defensive Error Swallowing** | Never wrap internal pure logic in broad catch-all blocks or silent fallback chains that hide bugs. |
-| **`LLM-03`** | **No Vague Container Nouns** | Ban `data`, `info`, `item`, `temp`, `result`, and `handler` as parameter/variable names outside 3-line comprehensions/iterators. |
+| **`LLM-03`** | **No Vague or Single-Char Names** | Ban vague container nouns (`data`, `info`, `item`, `temp`, `result`, `handler`) and single-character parameter/variable names (`i`, `n`, `x`, `v`) outside `_` for ignored values (e.g., `for index, name in enumerate(names)`, not `for i, n in ...`). |
 | **`LLM-04`** | **No Single-Use DTO Bloat** | Use the language's idiomatic named/structured parameter mechanism instead of inventing one-off parameter wrapper types. |
 | **`LLM-05`** | **No Linter-Gaming Compression** | Never strip blank lines, pack multiple statements onto one line, or abbreviate identifiers to pass line caps; always format first, measure second. |

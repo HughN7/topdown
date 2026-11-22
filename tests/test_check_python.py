@@ -105,8 +105,8 @@ class TestCheckPython(unittest.TestCase):
 
         bad_pos = "def fn_bad(a: int, b: int, c: int, d: int) -> int:\n    return a + b + c + d\n"
         good_kw = (
-            "def fn_good(a: int, b: int, c: int, *, d: int, e: int) -> int:\n"
-            "    return a + b + c + d + e\n"
+            "def fn_good(first: int, second: int, third: int, *, fourth: int, fifth: int) -> int:\n"
+            "    return first + second + third + fourth + fifth\n"
         )
         bad_total = (
             "def fn_many(a: int, b: int, *, c: int, d: int, e: int, f: int, g: int) -> int:\n"
@@ -180,6 +180,36 @@ class TestCheckPython(unittest.TestCase):
         )
         self.assertIn("LLM-03", [v.rule for v in check_python.check_source(bad_param, "v1.py")])
         self.assertEqual(check_python.check_source(ok_comp, "v2.py"), [])
+
+    def test_single_char_names_flag_llm03_except_underscore(self) -> None:
+        import check_python
+
+        bad_loop = (
+            "def list_names(names: list[str]) -> list[str]:\n"
+            "    lines: list[str] = []\n"
+            "    for i, n in enumerate(names):\n"
+            '        lines.append(f"{i}: {n}")\n'
+            "    return lines\n"
+        )
+        bad_param = "def square(x: int) -> int:\n    return x * x\n"
+        good_loop = (
+            "def list_names(names: list[str]) -> list[str]:\n"
+            "    lines: list[str] = []\n"
+            "    for index, name in enumerate(names):\n"
+            '        lines.append(f"{index}: {name}")\n'
+            "    return lines\n"
+        )
+        good_discard = (
+            "def repeat_count(times: int) -> int:\n"
+            "    total = 0\n"
+            "    for _ in range(times):\n"
+            "        total += 1\n"
+            "    return total\n"
+        )
+        self.assertIn("LLM-03", [v.rule for v in check_python.check_source(bad_loop, "sc1.py")])
+        self.assertIn("LLM-03", [v.rule for v in check_python.check_source(bad_param, "sc2.py")])
+        self.assertEqual(check_python.check_source(good_loop, "sc3.py"), [])
+        self.assertEqual(check_python.check_source(good_discard, "sc4.py"), [])
 
     def test_topdown_ignore_suppresses_with_reason_and_flags_without(self) -> None:
         import check_python

@@ -316,9 +316,9 @@ def scan_body_violations(
     violations: list[Violation] = []
     all_params = fn_node.args.posonlyargs + fn_node.args.args + fn_node.args.kwonlyargs
     violations.extend(
-        Violation(file_path, fn_node.lineno, "LLM-03", f"Vague parameter name '{param.arg}'.")
+        Violation(file_path, fn_node.lineno, "LLM-03", f"Vague or single-char parameter name '{param.arg}'.")
         for param in all_params
-        if param.arg in VAGUE_NOUNS
+        if param.arg in VAGUE_NOUNS or (len(param.arg) == 1 and param.arg != "_")
     )
     comp_target_ids = {
         id(target_node)
@@ -336,8 +336,10 @@ def scan_body_violations(
         if isinstance(node, ast.IfExp) and (isinstance(node.body, ast.IfExp) or isinstance(node.orelse, ast.IfExp)):
             violations.append(Violation(file_path, node.lineno, "CANON-05", "Nested inline conditional expression is banned."))
             continue
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in VAGUE_NOUNS and id(node) not in comp_target_ids:
-            violations.append(Violation(file_path, node.lineno, "LLM-03", f"Vague variable name '{node.id}'."))
+        is_single_char = isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and len(node.id) == 1 and node.id != "_"
+        is_vague_var = isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in VAGUE_NOUNS and id(node) not in comp_target_ids
+        if is_single_char or is_vague_var:
+            violations.append(Violation(file_path, node.lineno, "LLM-03", f"Vague or single-char variable name '{node.id}'."))
             continue
         if not isinstance(node, ast.ExceptHandler):
             continue
