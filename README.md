@@ -4,18 +4,14 @@
 
 Unconstrained coding agents tend to produce 300-line monolithic functions, deeply nested conditionals, tangled closures, and untyped dictionaries. **Topdown** pairs a terse set of opinionated structural rules with standard linter configs and zero-dependency checkers so every file reads top-down like a technical memo—easy to scan, unit-test without mocks, and maintain on Day 1. Adopt it as-is, fork it, or override specific directories (tighter or looser) via `zones/` and `topdown-ignore`.
 
----
-
 ## Quickstart
 
 No installer or CLI required. Pick only the files your repo uses to keep agent context lean (~80–120 lines total):
 
 1. **Add rules to `AGENTS.md`:** Copy or reference [`core/base.md`](core/base.md), your language pack from [`languages/`](languages/), and any applicable profile from [`zones/`](zones/).
-2. **Enable linters & checks:** Copy the linter snippet from your language pack (`pyproject.toml`, `eslint.config.js`, or `clippy.toml`), optionally drop in the matching script from [`enforcement/`](enforcement/), and add [`enforcement/ci_escape_hatch.yml`](enforcement/ci_escape_hatch.yml) to `.github/workflows/`.
+2. **Enable linters & checks:** Copy the linter snippet from your language pack (`pyproject.toml`, `.oxlintrc.json` / `eslint.config.js`, `clippy.toml`, or `.swiftlint.yml`), optionally drop in the matching script from [`enforcement/`](enforcement/), and add [`enforcement/ci_escape_hatch.yml`](enforcement/ci_escape_hatch.yml) to `.github/workflows/`.
 3. **Or hand it to your agent:**
    > Read `https://github.com/HughN7/topdown` and adopt `core/base.md` plus the matching `languages/` pack, `zones/` profile, and linter config into this repo's `AGENTS.md`.
-
----
 
 ## How It's Structured
 
@@ -40,9 +36,11 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 
 *Why isn't `--fix` universal?* Reordering code safely requires a real AST and language-specific hoisting rules (e.g., JS `const` arrow functions are not hoisted; Python decorators bind at import time). Heuristic and linter-only paths intentionally omit `--fix` and rely on actionable `CANON-01` diagnostics instead.
 
+*Using another language (Kotlin, Zig, C#, etc.)?* Point your agent at [`core/base.md`](core/base.md) plus any [`languages/*.md`](languages/) file as a template to generate a pack directly in your repo's `AGENTS.md`—or open a PR per [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ### Optional: Universal Tree-sitter Engine & Opt-In `CANON-02` Boundaries
 
-If you want one real AST engine across Python, TypeScript/JS, Rust, Swift, and Go—or opt-in cross-file I/O boundary checks—install or run it directly from GitHub (no PyPI release needed):
+If you want one real AST engine across Python, TypeScript/JS, Rust, Swift, and Go—or opt-in cross-file I/O boundary checks—run or install it directly from GitHub (no PyPI release needed):
 
 ```bash
 # Run ephemerally via uvx (zero install) or install with pip
@@ -64,8 +62,6 @@ shell_dirs = ["src/adapters"]     # optional: pure_dirs cannot import from shell
 extra_io_imports = ["stripe"]     # optional: project-specific I/O packages
 ```
 
-*Using another language (Go, Kotlin, etc.)?* Point your agent at [`core/base.md`](core/base.md) plus any [`languages/*.md`](languages/) file as a template to generate a pack directly in your repo's `AGENTS.md`—or open a PR per [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
 ### Optional: Auto-Check on Every Edit (`PostToolUse` Hook)
 
 Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Antigravity so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations):
@@ -82,8 +78,6 @@ Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cur
   }
 }
 ```
-
----
 
 ## Before vs. After
 
@@ -172,8 +166,6 @@ Runs the checkers against the example pairs in [`examples/fixtures/`](examples/f
 | Python | 9 | 0 | -9 | PASS |
 | TypeScript | 4 | 0 | -4 | PASS |
 | Rust | 4 | 0 | -4 | PASS |
-
----
 
 ## Contributing & License
 
