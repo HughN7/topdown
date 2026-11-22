@@ -2,7 +2,7 @@
 
 **An opinionated, language-agnostic architecture and style guide for agent-accelerated codebases.**
 
-Unconstrained coding agents tend to produce 300-line monolithic functions, deeply nested conditionals, tangled closures, and untyped dictionaries. **Topdown** pairs a terse set of opinionated structural rules with standard linter configs and zero-dependency checkers so every file reads top-down like a technical memo—easy to scan, unit-test without mocks, and maintain on Day 1. Adopt it as-is, fork it, or relax specific directories via `zones/` and `topdown-ignore`.
+Unconstrained coding agents tend to produce 300-line monolithic functions, deeply nested conditionals, tangled closures, and untyped dictionaries. **Topdown** pairs a terse set of opinionated structural rules with standard linter configs and zero-dependency checkers so every file reads top-down like a technical memo—easy to scan, unit-test without mocks, and maintain on Day 1. Adopt it as-is, fork it, or override specific directories (tighter or looser) via `zones/` and `topdown-ignore`.
 
 ---
 
@@ -25,7 +25,7 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 |---|---|---|
 | **Core** | [`core/base.md`](core/base.md) | 13 language-agnostic rules (`CANON-01..08`, `LLM-01..05`): top-down `L0→L3` order, I/O shell / pure core, 60–80 line cap, max nesting depth 2, explicit types, human-gated overrides. |
 | **Languages** | [`languages/`](languages/) | Idiom mappings + runnable linter configs. Ships with [Python](languages/python.md), [TypeScript/JS](languages/typescript.md), and [Rust](languages/rust.md); extensible to any language. |
-| **Zones** | [`zones/`](zones/) | Optional directory-scoped relaxations: [`frontend-ui.md`](zones/frontend-ui.md) (closures in `src/components/**`) and [`systems-hotpath.md`](zones/systems-hotpath.md) (in-place buffers + benchmark gate). |
+| **Zones** | [`zones/`](zones/) | Optional directory-scoped rule overrides—either **relaxing** rules where framework/systems mechanics require it ([`frontend-ui.md`](zones/frontend-ui.md), [`systems-hotpath.md`](zones/systems-hotpath.md)) or **tightening** them for high-stakes paths ([`security-critical.md`](zones/security-critical.md)). |
 | **Enforcement** | [`enforcement/`](enforcement/) | Zero-dependency checkers (`check_python.py` full AST; `check_ts.mjs` and `check_rust.py` scoped heuristics) + PR escape-hatch workflow. |
 
 ---
@@ -122,11 +122,8 @@ Runs the checkers against the example pairs in [`examples/fixtures/`](examples/f
 
 ## Adding a Language or Zone
 
-`core/base.md` is language-neutral. Adding Go, Swift, Kotlin, etc. takes one file at `languages/<lang>.md` with three sections:
-
-1. **Idiom Mapping** — map `CANON-01..08` / `LLM-01..05` to the language's idioms.
-2. **Standard Linter Config** — copy-pasteable config (e.g., `.golangci.yml`, `.swiftlint.yml`).
-3. **Structural Checker** — command if a checker exists, or note that enforcement is linter-only.
+- **New Language (`languages/<lang>.md`):** `core/base.md` is language-neutral. Add Go, Swift, Kotlin, etc. with one file containing: (1) **Idiom Mapping** (`CANON-01..08` / `LLM-01..05`), (2) **Standard Linter Config** (e.g., `.golangci.yml`, `.swiftlint.yml`), and (3) **Structural Checker** (command or linter-only note).
+- **New Zone (`zones/<zone>.md`):** Define the directory scope, a **Rule Overrides** table (each rule marked `Relax` or `Tighten`), and any required guardrail.
 
 ---
 
