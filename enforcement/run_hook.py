@@ -21,9 +21,9 @@ ENGINE_EXTENSIONS = frozenset({".swift", ".go"})
 
 
 def main() -> int:
-    raw_input = sys.stdin.read()
+    raw_input = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     target_path = extract_file_path(raw_input)
-    if target_path is None or not target_path.is_file():
+    if target_path is None or not target_path.is_file() or target_path.name.endswith(".d.ts"):
         return 0
     command = build_checker_command(target_path)
     if not command:

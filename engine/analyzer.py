@@ -42,6 +42,7 @@ class FunctionEntry:
     node: Any
     start_line: int
     end_line: int
+    outer_start_line: int = 0
 
 
 def analyze_source(source: str, file_path: str) -> list[Violation]:
@@ -167,6 +168,7 @@ def collect_top_functions(root_node: Any, source_bytes: bytes, spec: LanguageSpe
                 node=target,
                 start_line=target.start_point[0] + 1,
                 end_line=target.end_point[0] + 1,
+                outer_start_line=child.start_point[0] + 1,
             )
         )
     return entries
@@ -176,7 +178,12 @@ def collect_member_functions(root_node: Any, source_bytes: bytes, spec: Language
     if not spec.container_nodes:
         return []
     entries: list[FunctionEntry] = []
-    stack = [child for child in root_node.named_children if child.type in spec.container_nodes or child.type in spec.wrapper_nodes]
+    stack = [
+        child
+        for child in root_node.named_children
+        if unwrap_function_node(child, spec) is None
+        and (child.type in spec.container_nodes or child.type in spec.wrapper_nodes)
+    ]
     while stack:
         node = stack.pop()
         children = node.named_children
@@ -187,7 +194,13 @@ def collect_member_functions(root_node: Any, source_bytes: bytes, spec: Language
             and (child.type in spec.container_nodes or child.type in spec.wrapper_nodes)
         )
         entries.extend(
-            FunctionEntry(name, target, target.start_point[0] + 1, target.end_point[0] + 1)
+            FunctionEntry(
+                name,
+                target,
+                target.start_point[0] + 1,
+                target.end_point[0] + 1,
+                child.start_point[0] + 1,
+            )
             for child in children
             if (target := unwrap_function_node(child, spec)) is not None
             and (name := extract_node_name(target, source_bytes)) is not None
@@ -306,6 +319,7 @@ def inspect_function_body(fn_node: Any, spec: LanguageSpec) -> tuple[int, list[i
             node.type in spec.control_nodes
             and node.parent is not None
             and node.parent.type in {"else_clause", "elif_clause", "if_statement"}
+            and node != node.parent.child_by_field_name("consequence")
         )
         adds_depth = node.type in spec.control_nodes and not is_else_if
         next_depth = depth + 1 if adds_depth else depth
@@ -324,8 +338,13 @@ def filter_suppressed(
         span_lines = {
             line_num
             for fn_entry in top_functions
-            if fn_entry.start_line <= entry.line <= fn_entry.end_line
-            for line_num in (fn_entry.start_line, fn_entry.start_line - 1)
+            if (fn_entry.outer_start_line or fn_entry.start_line) <= entry.line <= fn_entry.end_line
+            for line_num in (
+                fn_entry.start_line,
+                fn_entry.start_line - 1,
+                fn_entry.outer_start_line or fn_entry.start_line,
+                (fn_entry.outer_start_line or fn_entry.start_line) - 1,
+            )
         }
         candidate_lines = {entry.line, entry.line - 1} | span_lines
         is_suppressed = any(

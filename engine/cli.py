@@ -53,7 +53,10 @@ def main() -> int:
         print(cfg_error, file=sys.stderr)
         return 2
     exclude_dirs = boundary_cfg.exclude_dirs if boundary_cfg is not None else ()
-    target_files, file_error = collect_supported_files(options.paths, exclude_dirs=exclude_dirs)
+    exclude_root = boundary_cfg.root_dir if boundary_cfg is not None else None
+    target_files, file_error = collect_supported_files(
+        options.paths, exclude_dirs=exclude_dirs, exclude_root=exclude_root
+    )
     if file_error is not None:
         print(file_error, file=sys.stderr)
         return 2
@@ -102,6 +105,7 @@ def collect_supported_files(
     raw_paths: tuple[str, ...],
     *,
     exclude_dirs: tuple[str, ...] = (),
+    exclude_root: Path | None = None,
 ) -> tuple[list[Path], str | None]:
     collected: list[Path] = []
     for raw_entry in raw_paths:
@@ -118,16 +122,29 @@ def collect_supported_files(
             if path.is_file()
             and spec_for_path(path) is not None
             and not path.name.endswith(".d.ts")
-            and not is_excluded_rel_path(path.relative_to(target), exclude_dirs)
+            and not is_excluded_path(path, target, exclude_dirs=exclude_dirs, exclude_root=exclude_root)
         ]
         collected.extend(found)
     return collected, None
 
 
-def is_excluded_rel_path(rel_path: Path, exclude_dirs: tuple[str, ...]) -> bool:
-    if any(part in SKIP_DIRS for part in rel_path.parts):
+def is_excluded_path(
+    file_path: Path,
+    target_root: Path,
+    *,
+    exclude_dirs: tuple[str, ...],
+    exclude_root: Path | None,
+) -> bool:
+    rel_to_target = file_path.relative_to(target_root)
+    if any(part in SKIP_DIRS for part in rel_to_target.parts):
         return True
-    rel_posix = rel_path.as_posix()
+    if not exclude_dirs:
+        return False
+    base = exclude_root if exclude_root is not None else target_root.resolve()
+    try:
+        rel_posix = file_path.resolve().relative_to(base).as_posix()
+    except ValueError:
+        rel_posix = rel_to_target.as_posix()
     return any(rel_posix == prefix or rel_posix.startswith(f"{prefix}/") for prefix in exclude_dirs)
 
 

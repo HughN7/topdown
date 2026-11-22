@@ -46,12 +46,15 @@ def load_boundary_config(root_dir: Path, explicit_config: Path | None) -> tuple[
         return None, f"Invalid config {config_path}: {exc}"
     section = raw_table.get("boundaries") if isinstance(raw_table.get("boundaries"), dict) else {}
     raw_excludes = raw_table.get("exclude_dirs", section.get("exclude_dirs", []))
-    exclude_dirs = tuple(normalize_rel_dir(entry) for entry in raw_excludes if isinstance(entry, str))
-    pure_dirs = tuple(normalize_rel_dir(entry) for entry in section.get("pure_dirs", []) if isinstance(entry, str))
+    raw_pure = section.get("pure_dirs", [])
+    raw_shell = section.get("shell_dirs", [])
+    raw_extra = section.get("extra_io_imports", [])
+    exclude_dirs = tuple(normalize_rel_dir(entry) for entry in raw_excludes if isinstance(entry, str)) if isinstance(raw_excludes, list) else ()
+    pure_dirs = tuple(normalize_rel_dir(entry) for entry in raw_pure if isinstance(entry, str)) if isinstance(raw_pure, list) else ()
     if not pure_dirs and not exclude_dirs:
         return None, None
-    shell_dirs = tuple(normalize_rel_dir(entry) for entry in section.get("shell_dirs", []) if isinstance(entry, str))
-    extra_io = tuple(entry for entry in section.get("extra_io_imports", []) if isinstance(entry, str))
+    shell_dirs = tuple(normalize_rel_dir(entry) for entry in raw_shell if isinstance(entry, str)) if isinstance(raw_shell, list) else ()
+    extra_io = tuple(entry for entry in raw_extra if isinstance(entry, str)) if isinstance(raw_extra, list) else ()
     use_defaults = bool(section.get("use_default_io_imports", True))
     return BoundaryConfig(config_path.parent.resolve(), pure_dirs, shell_dirs, extra_io, use_defaults, exclude_dirs), None
 
@@ -115,9 +118,13 @@ def extract_imports(root_node: object, source_bytes: bytes, spec: LanguageSpec) 
         if node.type not in spec.import_nodes:
             stack.extend(node.named_children)
             continue
-        text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
-        line_no = node.start_point[0] + 1
-        found.extend((line_no, token) for token in parse_import_targets(text, spec.name))
+        target_node = node.child_by_field_name("source") if node.type == "export_statement" else node
+        if target_node is None:
+            continue
+        text = source_bytes[target_node.start_byte : target_node.end_byte].decode("utf-8", errors="replace")
+        line_no = target_node.start_point[0] + 1
+        tokens = QUOTED_IMPORT_PATTERN.findall(text) if node.type == "export_statement" else parse_import_targets(text, spec.name)
+        found.extend((line_no, token) for token in tokens)
     return sorted(found, key=lambda pair: pair[0])
 
 
@@ -133,10 +140,10 @@ def parse_import_targets(text: str, lang_name: str) -> list[str]:
     if lang_name == "rust":
         group_match = RUST_GROUP_PATTERN.search(text)
         if group_match:
-            prefix = group_match.group(1)
+            prefix = group_match.group(1).lstrip(":")
             return [f"{prefix}::{entry.strip().split()[0]}" for entry in group_match.group(2).split(",") if entry.strip()]
         single = RUST_SINGLE_PATTERN.search(text)
-        return [single.group(1)] if single else []
+        return [single.group(1).lstrip(":")] if single else []
     if lang_name == "swift":
         match = SWIFT_IMPORT_PATTERN.search(text)
         return [match.group(1)] if match else []

@@ -27,8 +27,8 @@ const TEST_RUNNER_BRANCH_PATTERN =
   /\bprocess\.env\.(?:VITEST|JEST_WORKER_ID)\b|\bprocess\.env\.NODE_ENV\s*===?\s*["']test["']/;
 const TEST_PATH_PATTERN =
   /(?:^|[\\/])(?:tests?|__tests__)[\\/]|\.(?:test|spec)\.[a-z]+$/i;
-const REGEX_PRECEDING_CHARS = new Set(["", "(", "[", "{", ",", ":", ";", "=", "!", "&", "|", "?", "+", "-", "*", "%", "~", "^", "\n"]);
-const REGEX_PRECEDING_KEYWORDS = new Set(["return", "case", "throw", "in", "of", "typeof", "void", "delete", "new", "yield", "await"]);
+const REGEX_PRECEDING_CHARS = new Set(["", "(", "[", "{", ",", ":", ";", "=", "!", "&", "|", "?", "+", "-", "*", "%", "~", "^", ">", "\n"]);
+const REGEX_PRECEDING_KEYWORDS = new Set(["return", "case", "default", "throw", "in", "of", "typeof", "void", "delete", "new", "yield", "await"]);
 
 async function main() {
   const options = parseCliArgs(process.argv.slice(2));
@@ -109,12 +109,14 @@ export function checkSourceWithAst(source, filePath, tsMod) {
   const { directives, ignoreViolations } = parseIgnoreDirectives(comments, filePath);
   const sf = tsMod.createSourceFile(filePath, source, tsMod.ScriptTarget.Latest, true);
   const topFunctions = collectTopLevelAstFunctions(sf, tsMod);
+  const memberFunctions = collectAstMemberFunctions(sf, tsMod);
+  const allFunctions = [...topFunctions, ...memberFunctions];
   const rawViolations = [
     ...checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath),
-    ...checkAstFunctionRules(topFunctions, sf, tsMod, filePath),
+    ...checkAstFunctionRules(allFunctions, sf, tsMod, filePath),
     ...checkTestRunnerBranching(source, cleaned.split(/\r?\n/), filePath),
   ];
-  const spans = topFunctions.map((entry) => ({ startLine: entry.startLine, endLine: entry.endLine }));
+  const spans = allFunctions.map((entry) => ({ startLine: entry.startLine, endLine: entry.endLine }));
   const kept = filterSuppressed(rawViolations, spans, directives);
   return [...ignoreViolations, ...kept].sort(
     (left, right) => left.line - right.line || left.rule.localeCompare(right.rule),
@@ -126,6 +128,9 @@ export function fixSourceWithAst(source, filePath, tsMod) {
   const fnPositions = [];
   for (let idx = 0; idx < sf.statements.length; idx += 1) {
     const stmt = sf.statements[idx];
+    if (tsMod.isFunctionDeclaration(stmt) && !stmt.body) {
+      return { source, refusal: "Refused --fix: function overload signatures detected." };
+    }
     if (tsMod.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
       fnPositions.push({ idx, stmt, name: stmt.name.text });
     }
@@ -149,25 +154,38 @@ export function fixSourceWithAst(source, filePath, tsMod) {
     return { source, refusal: null };
   }
   const sourceLines = source.split(/\r?\n/);
-  const spans = fnPositions.map((entry, idx) => {
-    const startLine = sf.getLineAndCharacterOfPosition(entry.stmt.getStart(sf)).line;
-    const prevEndLine = idx > 0 ? sf.getLineAndCharacterOfPosition(fnPositions[idx - 1].stmt.getEnd()).line + 1 : 0;
-    let blockStartLine = startLine;
-    while (blockStartLine > prevEndLine && sourceLines[blockStartLine - 1].trim().startsWith("//")) {
-      if (blockStartLine - 1 === 0 && /@ts-|eslint-disable|copyright|license/i.test(sourceLines[0])) {
-        break;
-      }
-      blockStartLine -= 1;
-    }
-    const endLine = sf.getLineAndCharacterOfPosition(entry.stmt.getEnd()).line + 1;
-    return { startLine: blockStartLine, endLine };
-  });
+  const spans = buildSafeTsFunctionSpans(fnPositions, sf, sourceLines);
+  if (!spans) {
+    return { source, refusal: "Refused --fix: detached or block comments between functions would be lost." };
+  }
   const prefix = sourceLines.slice(0, spans[0].startLine).join("\n");
   const suffix = sourceLines.slice(spans[spans.length - 1].endLine).join("\n");
   const blocks = ordered.map((idx) => sourceLines.slice(spans[idx].startLine, spans[idx].endLine).join("\n").trimEnd());
   const lead = prefix.trimEnd() ? `${prefix.trimEnd()}\n\n` : "";
   const tail = suffix.trim() ? `\n\n${suffix.trimStart()}` : "\n";
   return { source: `${lead}${blocks.join("\n\n")}${tail}`, refusal: null };
+}
+
+function buildSafeTsFunctionSpans(fnPositions, sf, sourceLines) {
+  const spans = [];
+  for (let idx = 0; idx < fnPositions.length; idx += 1) {
+    const startLine = sf.getLineAndCharacterOfPosition(fnPositions[idx].stmt.getStart(sf)).line;
+    const prevEndLine = idx > 0 ? sf.getLineAndCharacterOfPosition(fnPositions[idx - 1].stmt.getEnd()).line + 1 : 0;
+    let blockStartLine = startLine;
+    while (
+      blockStartLine > prevEndLine &&
+      sourceLines[blockStartLine - 1].trim().startsWith("//") &&
+      !(blockStartLine - 1 === 0 && /@ts-|eslint-disable|copyright|license/i.test(sourceLines[0]))
+    ) {
+      blockStartLine -= 1;
+    }
+    if (idx > 0 && sourceLines.slice(prevEndLine, blockStartLine).some((line) => line.trim().length > 0)) {
+      return null;
+    }
+    const endLine = sf.getLineAndCharacterOfPosition(fnPositions[idx].stmt.getEnd()).line + 1;
+    spans.push({ startLine: blockStartLine, endLine });
+  }
+  return spans;
 }
 
 export function checkSource(source, filePath) {
@@ -268,23 +286,28 @@ function parseCliArgs(rawArgs) {
   for (const token of rawArgs) {
     if (token === "--json") {
       asJson = true;
-    } else if (token === "--fix") {
-      applyFix = true;
-    } else if (token === "--dry-run") {
-      dryRun = true;
-    } else if (token === "--show-backend") {
-      showBackend = true;
-    } else if (token.startsWith("--backend=")) {
-      const value = token.slice("--backend=".length);
-      if (!["auto", "ast", "heuristic"].includes(value)) {
-        return null;
-      }
-      backend = value;
-    } else if (token.startsWith("-")) {
-      return null;
-    } else {
-      paths.push(token);
+      continue;
     }
+    if (token === "--fix") {
+      applyFix = true;
+      continue;
+    }
+    if (token === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (token === "--show-backend") {
+      showBackend = true;
+      continue;
+    }
+    if (token.startsWith("--backend=") && ["auto", "ast", "heuristic"].includes(token.slice("--backend=".length))) {
+      backend = token.slice("--backend=".length);
+      continue;
+    }
+    if (token.startsWith("-")) {
+      return null;
+    }
+    paths.push(token);
   }
   return paths.length > 0 ? { paths, asJson, applyFix, dryRun, showBackend, backend } : null;
 }
@@ -451,6 +474,12 @@ function consumeTemplateLiteral(source, state) {
   state.idx += 1;
   while (state.idx < source.length) {
     const ch = source[state.idx];
+    if (ch === "\\" && source[state.idx + 1] === "\n") {
+      state.out += "\n";
+      state.line += 1;
+      state.idx += 2;
+      continue;
+    }
     if (ch === "\\") {
       state.idx += 2;
       continue;
@@ -487,16 +516,22 @@ function consumeRegexLiteral(source, state) {
     }
     if (ch === "[") {
       inClass = true;
-    } else if (ch === "]") {
-      inClass = false;
-    } else if (ch === "/" && !inClass) {
       state.idx += 1;
-      while (state.idx < source.length && /[a-z]/i.test(source[state.idx])) {
-        state.idx += 1;
-      }
+      continue;
+    }
+    if (ch === "]") {
+      inClass = false;
+      state.idx += 1;
+      continue;
+    }
+    if (ch === "/" && !inClass) {
+      state.idx += 1;
+      const tailMatch = /^[a-z]+/i.exec(source.slice(state.idx));
+      state.idx += tailMatch ? tailMatch[0].length : 0;
       state.lastToken = "literal";
       return;
-    } else if (ch === "\n") {
+    }
+    if (ch === "\n") {
       state.out += "\n";
       state.line += 1;
       return;
@@ -558,16 +593,20 @@ function extractFunctions(lines) {
     const openParens = countChar(lines[idx], "(");
     const closeParens = countChar(lines[idx], ")");
     const isDeclStart = FUNC_DECL_PATTERN.test(trimmed) || ARROW_DECL_PATTERN.test(trimmed);
-    if (activeStart === -1 && pendingStart === -1 && braceDepth === 0 && isDeclStart) {
-      pendingStart = idx + 1;
+    if (activeStart === -1 && pendingStart === -1) {
+      parenDepth = 0;
+      pendingStart = braceDepth === 0 && isDeclStart ? idx + 1 : -1;
     }
     parenDepth += openParens - closeParens;
-    if (pendingStart !== -1 && parenDepth <= 0 && opens > closes) {
+    if (pendingStart !== -1 && parenDepth <= 0 && opens > 0 && opens === closes) {
+      spans.push({ startLine: pendingStart, bodyStartLine: idx + 1, endLine: idx + 1 });
+      pendingStart = -1;
+    } else if (pendingStart !== -1 && parenDepth <= 0 && opens > closes) {
       activeStart = pendingStart;
       activeBodyStart = idx + 1;
       activeBaseDepth = braceDepth;
       pendingStart = -1;
-    } else if (pendingStart !== -1 && parenDepth <= 0 && trimmed.endsWith(";")) {
+    } else if (pendingStart !== -1 && parenDepth <= 0 && (trimmed.endsWith(";") || (opens === 0 && /=>\s*[^({\s]/.test(trimmed)))) {
       pendingStart = -1;
     }
     braceDepth += opens - closes;
@@ -586,7 +625,6 @@ function measureControlNesting(lines, bodyStartLine, endLine) {
   for (let lineNo = bodyStartLine; lineNo <= endLine; lineNo += 1) {
     const lineText = lines[lineNo - 1];
     const trimmed = lineText.trim();
-    const isElseIf = /\belse\s+if\b/.test(lineText);
     const leadingCloses = countLeadingCloses(trimmed);
     const opens = countChar(lineText, "{");
     const closes = countChar(lineText, "}");
@@ -594,7 +632,7 @@ function measureControlNesting(lines, bodyStartLine, endLine) {
     while (controlStack.length > 0 && braceDepth <= controlStack[controlStack.length - 1]) {
       controlStack.pop();
     }
-    if (lineNo > bodyStartLine && !isElseIf && CONTROL_OPEN_PATTERN.test(lineText)) {
+    if (lineNo > bodyStartLine && CONTROL_OPEN_PATTERN.test(lineText)) {
       controlStack.push(braceDepth);
       maxNesting = Math.max(maxNesting, controlStack.length);
     }
@@ -678,6 +716,37 @@ function collectTopLevelAstFunctions(sf, tsMod) {
     functions.push({ name: stmt.name.text, node: stmt, startLine, endLine });
   }
   return functions;
+}
+
+function collectAstMemberFunctions(sf, tsMod) {
+  const members = [];
+  for (const stmt of sf.statements) {
+    const decls = tsMod.isVariableStatement(stmt)
+      ? stmt.declarationList.declarations.filter(
+          (decl) => tsMod.isIdentifier(decl.name) && decl.initializer && tsMod.isArrowFunction(decl.initializer) && tsMod.isBlock(decl.initializer.body),
+        )
+      : [];
+    members.push(
+      ...decls.map((decl) => ({
+        name: decl.name.text,
+        node: decl.initializer,
+        startLine: sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1,
+        endLine: sf.getLineAndCharacterOfPosition(decl.initializer.getEnd()).line + 1,
+      })),
+    );
+    const methods = tsMod.isClassDeclaration(stmt)
+      ? stmt.members.filter((member) => tsMod.isMethodDeclaration(member) && member.body && member.name)
+      : [];
+    members.push(
+      ...methods.map((member) => ({
+        name: member.name.getText(sf),
+        node: member,
+        startLine: sf.getLineAndCharacterOfPosition(member.getStart(sf)).line + 1,
+        endLine: sf.getLineAndCharacterOfPosition(member.getEnd()).line + 1,
+      })),
+    );
+  }
+  return members;
 }
 
 function checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath) {

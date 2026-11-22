@@ -135,6 +135,8 @@ def check_fn_spans(fn_spans: list[FnSpan], lines: list[str], file_path: str) -> 
 
 
 def check_unwrap_calls(lines: list[str], file_path: str) -> list[Violation]:
+    if TEST_PATH_PATTERN.search(file_path):
+        return []
     return [
         Violation(
             file_path,
@@ -368,12 +370,13 @@ def measure_control_nesting(lines: list[str], body_start_line: int, end_line: in
         trimmed = line_text.strip()
         leading_closes = len(trimmed) - len(trimmed.lstrip("}"))
         is_let_else = bool(re.search(r"\blet\b.*\belse\s*\{", line_text))
+        is_match_guard = "=>" in line_text
         opens = line_text.count("{")
         closes = line_text.count("}")
         brace_depth -= leading_closes
         while control_stack and brace_depth <= control_stack[-1]:
             control_stack.pop()
-        if line_no > body_start_line and not is_let_else and CONTROL_OPEN_PATTERN.search(line_text):
+        if line_no > body_start_line and not is_let_else and not is_match_guard and CONTROL_OPEN_PATTERN.search(line_text):
             control_stack.append(brace_depth)
             max_nesting = max(max_nesting, len(control_stack))
         brace_depth += opens - (closes - leading_closes)

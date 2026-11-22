@@ -141,7 +141,10 @@ def fix_source(source: str) -> tuple[str, str | None]:
         return source, "Refused --fix: cyclic/mutual recursion detected in local call graph."
     if ordered_indices == list(range(len(top_functions))):
         return source, None
-    return rebuild_reordered_source(source, top_functions, ordered_indices), None
+    reordered = rebuild_reordered_source(source, top_functions, ordered_indices)
+    if reordered is None:
+        return source, "Refused --fix: detached comments between functions would be dropped."
+    return reordered, None
 
 
 def check_source(source: str, file_path: str) -> list[Violation]:
@@ -552,7 +555,7 @@ def rebuild_reordered_source(
     source: str,
     top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
     ordered_indices: list[int],
-) -> str:
+) -> str | None:
     lines = source.splitlines(keepends=True)
     spans: list[tuple[int, int]] = []
     prev_end = 0
@@ -564,6 +567,8 @@ def rebuild_reordered_source(
             and not HEADER_COMMENT_PATTERN.match(lines[start_idx - 1].lstrip())
         ):
             start_idx -= 1
+        if prev_end > 0 and any(line_text.strip() for line_text in lines[prev_end:start_idx]):
+            return None
         end_idx = fn_node.end_lineno or fn_node.lineno
         spans.append((start_idx, end_idx))
         prev_end = end_idx
