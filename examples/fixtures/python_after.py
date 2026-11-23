@@ -33,7 +33,7 @@ class BatchSummary:
     settled_payouts: tuple[SettledPayout, ...]
 
 
-# L0 Orchestrator (I/O Shell)
+# [L0] Orchestrator (I/O Shell)
 def process_payout_batch(
     requests: tuple[PayoutRequest, ...],
     *,
@@ -55,7 +55,7 @@ def process_payout_batch(
     return summary
 
 
-# L1 Pure Workflow
+# [L1] Pure Workflow
 def settle_eligible_payouts(
     requests: tuple[PayoutRequest, ...],
     *,
@@ -79,7 +79,7 @@ def settle_eligible_payouts(
     return tuple(settled)
 
 
-# L2 Pure Rule
+# [L2] Pure Rule
 def calculate_fee_cents(gross_cents: int, *, tier: str, min_fee_cents: int) -> int:
     if tier == "vip":
         return (gross_cents * VIP_FEE_BPS) // 10_000
@@ -88,6 +88,6 @@ def calculate_fee_cents(gross_cents: int, *, tier: str, min_fee_cents: int) -> i
     return (gross_cents * STANDARD_FEE_BPS) // 10_000
 
 
-# L3 Leaf Primitive (0 outbound local calls)
+# [L3] Leaf Primitive (0 outbound local calls)
 def format_cents_usd(amount_cents: int) -> str:
     return f"${amount_cents / 100:.2f}"

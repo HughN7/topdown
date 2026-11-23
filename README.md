@@ -48,6 +48,7 @@ uvx --from git+https://github.com/HughN7/topdown.git topdown src/
 pip install git+https://github.com/HughN7/topdown.git
 
 topdown src/                          # Single-file AST checks across all 5 languages (zero config)
+topdown --outline src/                # 1-second architectural X-Ray ([L0..L3] tiers, line spans, callers/callees)
 topdown --config topdown.toml src/    # Adds opt-in cross-file CANON-02 I/O boundary checks
 ```
 
@@ -112,7 +113,7 @@ def process_payouts(data: list[dict[str, Any]], tier: str, min_fee: int, dry_run
 ### After — Topdown L0–L3 ([`python_after.py`](examples/fixtures/python_after.py) · 0 violations)
 
 ```python
-# L0 Orchestrator (I/O Shell)
+# [L0] Orchestrator (I/O Shell)
 def process_payout_batch(
     requests: tuple[PayoutRequest, ...],
     *,
@@ -133,7 +134,7 @@ def process_payout_batch(
         save_summary(summary)
     return summary
 
-# L1 Pure Workflow -> L2 Pure Rule -> L3 Leaf Primitive
+# [L1] Pure Workflow
 def settle_eligible_payouts(
     requests: tuple[PayoutRequest, ...],
     *,
@@ -150,6 +151,7 @@ def settle_eligible_payouts(
         settled.append(SettledPayout(request.merchant_id, net_cents, format_cents_usd(net_cents)))
     return tuple(settled)
 
+# [L2] Pure Rule
 def calculate_fee_cents(gross_cents: int, *, tier: str, min_fee_cents: int) -> int:
     if tier == "vip":
         return (gross_cents * VIP_FEE_BPS) // 10_000
@@ -157,6 +159,7 @@ def calculate_fee_cents(gross_cents: int, *, tier: str, min_fee_cents: int) -> i
         return min_fee_cents
     return (gross_cents * STANDARD_FEE_BPS) // 10_000
 
+# [L3] Leaf Primitive
 def format_cents_usd(amount_cents: int) -> str:
     return f"${amount_cents / 100:.2f}"
 ```

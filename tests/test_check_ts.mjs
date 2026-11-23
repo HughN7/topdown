@@ -396,3 +396,65 @@ test("implicit state machine lifecycle boolean soup flags CANON-03 while orthogo
   assert.deepEqual(checkSource(suppressed, "legacy.ts"), []);
   assert.deepEqual(checkSource(cleanOrthogonal, "merchant.ts"), []);
 });
+
+test("stacked topdown-ignore above [L0] and JSDoc suppresses in heuristic and AST modes, and --outline requires AST", async () => {
+  const { checkSource } = await import("../enforcement/check_ts.mjs");
+  const stacked = [
+    '// topdown-ignore(CANON-05, reason="migrating [L1] ternary")',
+    "// [L0] Entrypoint",
+    "/** JSDoc comment */",
+    "export function pick(a: boolean, b: boolean): string {",
+    '  return a ? (b ? "x" : "y") : "z";',
+    "}",
+  ].join("\n");
+  const noAdjacentLeak = [
+    'export function first(): number { return 1; } // topdown-ignore(CANON-05, reason="only first")',
+    "export function second(a: boolean, b: boolean, c: boolean): number {",
+    "  if (a) {",
+    "    if (b) {",
+    "      if (c) {",
+    "        return 2;",
+    "      }",
+    "    }",
+    "  }",
+    "  return 0;",
+    "}",
+  ].join("\n");
+  assert.deepEqual(checkSource(stacked, "stacked.ts"), []);
+  assert.ok(checkSource(noAdjacentLeak, "leak.ts").some((e) => e.rule === "CANON-05"));
+
+  const { loadTypeScript, checkSourceWithAst } = await import("../enforcement/check_ts.mjs");
+  const tsMod = await loadTypeScript();
+  if (tsMod) {
+    assert.deepEqual(checkSourceWithAst(stacked, "stacked.ts", tsMod), []);
+    assert.ok(checkSourceWithAst(noAdjacentLeak, "leak.ts", tsMod).some((e) => e.rule === "CANON-05"));
+    const multiStmtBadL3 = [
+      "// [L3] Invalid leaf tag on multi-statement caller",
+      "export function runFlow(amount: number): number {",
+      "  const base = 10;",
+      "  return addBase(amount + base);",
+      "}",
+      "function addBase(amount: number): number {",
+      "  return amount + 1;",
+      "}",
+    ].join("\n");
+    assert.ok(checkSourceWithAst(multiStmtBadL3, "bad_l3.ts", tsMod).some((e) => e.rule === "CANON-01"));
+
+    const cleanFixture = path.join(rootDir, "examples", "fixtures", "ts_after.ts");
+    const outlineProc = spawnSync(process.execPath, [checkerPath, "--outline", cleanFixture], {
+      encoding: "utf8",
+    });
+    assert.equal(outlineProc.status, 0, outlineProc.stderr);
+    assert.match(outlineProc.stdout, /\[L0\] processPayoutBatch \(L32-L43, 12L\) -> formatCentsUsd, settleEligiblePayouts/);
+    assert.match(outlineProc.stdout, /\[L1\] settleEligiblePayouts \(L46-L65, 20L\) <- processPayoutBatch -> calculateFeeCents, formatCentsUsd/);
+  }
+
+  const cleanFixture = path.join(rootDir, "examples", "fixtures", "ts_after.ts");
+  const heurOutline = spawnSync(
+    process.execPath,
+    [checkerPath, "--backend=heuristic", "--outline", cleanFixture],
+    { encoding: "utf8" },
+  );
+  assert.equal(heurOutline.status, 2);
+  assert.match(heurOutline.stderr, /AST|typescript|topdown/i);
+});

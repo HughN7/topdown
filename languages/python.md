@@ -37,7 +37,7 @@ max-statements = 50
 Reference AST checker (zero dependencies, Python 3.12+ stdlib):
 
 ```bash
-python3 enforcement/check_python.py [--fix] [--dry-run] src/
+python3 enforcement/check_python.py [--fix] [--dry-run] [--outline] [--json] src/
 ```
 
-Checks `CANON-01` (topological order, L0–L3 depth, 80-line cap, safe-subset `--fix`), `CANON-03` (positional/total args, implicit state machines), `CANON-05` (nesting depth, inner `def`, nested ternary), `LLM-02` (error swallowing), `LLM-03` (vague/single-char names), `LLM-05` (anti-gaming names), `LLM-07` (test-runner branching), and `CANON-08` (`topdown-ignore` reason).
+Checks `CANON-01` (topological order, L0–L3 depth, `[L0]..[L3]` tier tag verification, 80-line cap, safe-subset `--fix`, `--outline` call-graph X-Ray), `CANON-03` (positional/total args, implicit state machines), `CANON-05` (nesting depth, inner `def`, nested ternary), `LLM-02` (error swallowing), `LLM-03` (vague/single-char names), `LLM-05` (anti-gaming names), `LLM-07` (test-runner branching), and `CANON-08` (`topdown-ignore` reason).

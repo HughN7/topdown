@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const MAX_FUNCTION_LINES = 80;
 const MAX_NESTING_DEPTH = 2;
@@ -19,6 +19,8 @@ const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".svelte-kit
 const IGNORE_PATTERN = /\/\/\s*topdown-ignore(?:\((.*)\))?/;
 const REASON_PATTERN = /reason\s*=\s*(?:"([^"]+)"|'([^']+)')/;
 const RULE_ID_PATTERN = /\b(?:CANON|LLM)-\d{2}\b/g;
+const TIER_TAG_PATTERN = /^\s*\/\/\s*\[L([0-3])\](?:\s|$)/;
+const TS_HEADER_COMMENT_PATTERN = /^(?:\/\/|\/\*+)\s*(?:@ts-|eslint-disable|copyright\b|license\b|spdx-license-identifier\b)/i;
 const FUNC_DECL_PATTERN = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b/;
 const ARROW_DECL_PATTERN = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$]\w*\s*=\s*(?:async\s*)?\(/;
 const CONTROL_OPEN_PATTERN = /\b(?:if|for|while|switch|try)\b[^{]*\{|(?<!\.)\bcatch\b[^{]*\{|\belse\s*\{/;
@@ -36,7 +38,7 @@ async function main() {
   const options = parseCliArgs(process.argv.slice(2));
   if (!options) {
     process.stderr.write(
-      "Usage: node check_ts.mjs [--json] [--backend=auto|ast|heuristic] [--show-backend] [--fix] [--dry-run] <path> [...]\n",
+      "Usage: node check_ts.mjs [--json] [--backend=auto|ast|heuristic] [--show-backend] [--fix] [--dry-run] [--outline] <path> [...]\n",
     );
     return 2;
   }
@@ -45,8 +47,8 @@ async function main() {
     process.stderr.write("Error: --backend=ast requested, but 'typescript' package is not installed.\n");
     return 2;
   }
-  if (options.applyFix && !tsMod) {
-    process.stderr.write("Error: --fix requires the optional 'typescript' AST backend (heuristic mode cannot safely rewrite source).\n");
+  if ((options.applyFix || options.outline) && !tsMod) {
+    process.stderr.write("Error: --fix and --outline require the optional 'typescript' AST backend (or run 'topdown --outline' via engine).\n");
     return 2;
   }
   const activeBackend = tsMod ? "ast" : "heuristic";
@@ -58,6 +60,9 @@ async function main() {
     process.stderr.write(`${collected.error}\n`);
     return 2;
   }
+  if (options.outline) {
+    return runTsOutline(collected.files, options.asJson, tsMod);
+  }
   const allViolations = [];
   for (const filePath of collected.files) {
     const readResult = readFileText(filePath);
@@ -65,13 +70,12 @@ async function main() {
       process.stderr.write(`${readResult.error}\n`);
       return 2;
     }
-    const source = options.applyFix && tsMod ? applyAstFix(readResult.source, filePath, options.dryRun, tsMod) : readResult.source;
-    const violations =
-      options.applyFix && options.dryRun
-        ? []
-        : tsMod
-          ? checkSourceWithAst(source, filePath, tsMod)
-          : checkSource(source, filePath);
+    const source =
+      options.applyFix && tsMod
+        ? applyAstFix({ source: readResult.source, filePath, dryRun: options.dryRun }, tsMod)
+        : readResult.source;
+    const checked = tsMod ? checkSourceWithAst(source, filePath, tsMod) : checkSource(source, filePath);
+    const violations = options.applyFix && options.dryRun ? [] : checked;
     allViolations.push(...violations);
   }
   if (!options.dryRun) {
@@ -80,15 +84,25 @@ async function main() {
   return allViolations.length > 0 ? 1 : 0;
 }
 
-function readFileText(filePath) {
-  try {
-    return { source: fs.readFileSync(filePath, "utf8"), error: null };
-  } catch (err) {
-    return { source: "", error: `Error reading ${filePath}: ${err.message}` };
+function runTsOutline(files, asJson, tsMod) {
+  const payload = [];
+  for (const filePath of files) {
+    const readResult = readFileText(filePath);
+    if (readResult.error) {
+      process.stderr.write(`${readResult.error}\n`);
+      return 2;
+    }
+    const isJsx = /\.[jt]sx$/i.test(filePath);
+    const lexed = lexSource(readResult.source, isJsx);
+    const functions = buildAstFileOutline({ source: readResult.source, filePath, lexed }, tsMod);
+    payload.push({ path: filePath, functions });
   }
+  const output = asJson ? `${JSON.stringify(payload, null, 2)}\n` : `${formatOutlineText(payload)}\n`;
+  process.stdout.write(output);
+  return 0;
 }
 
-function applyAstFix(source, filePath, dryRun, tsMod) {
+function applyAstFix({ source, filePath, dryRun }, tsMod) {
   const fixed = fixSourceWithAst(source, filePath, tsMod);
   if (fixed.refusal) {
     process.stderr.write(`${filePath}: ${fixed.refusal}\n`);
@@ -110,26 +124,78 @@ export async function loadTypeScript() {
     const loaded = await import("typescript");
     return loaded.default ?? loaded;
   } catch {
+    if (!process.env.APPDATA) {
+      return null;
+    }
+  }
+  try {
+    const globalTsPath = path.join(process.env.APPDATA, "npm", "node_modules", "typescript", "lib", "typescript.js");
+    const loaded = await import(pathToFileURL(globalTsPath).href);
+    return loaded.default ?? loaded;
+  } catch {
     return null;
   }
 }
 
+function buildAstFileOutline({ source, filePath, lexed }, tsMod) {
+  const sf = tsMod.createSourceFile(filePath, source, tsMod.ScriptTarget.Latest, true);
+  const topFunctions = collectTopLevelAstFunctions(sf, tsMod);
+  const rawLines = source.split("\n");
+  const allEndLines = topFunctions.map((entry) => entry.endLine);
+  const nameSet = new Set(topFunctions.map((entry) => entry.name));
+  const callGraph = new Map();
+  const declaredTags = new Map();
+  for (const entry of topFunctions) {
+    const callees = collectAstCalls(entry.node, nameSet, tsMod);
+    callees.delete(entry.name);
+    callGraph.set(entry.name, callees);
+    const prevEnd = Math.max(0, ...allEndLines.filter((end) => end < entry.startLine));
+    const leading = collectContiguousHeaderLines(rawLines, entry.startLine, {
+      prevEndLine: prevEnd,
+      commentLines: lexed.commentLines,
+    });
+    const { tag } = extractAstTierTags(rawLines, leading, lexed.lineCommentLines);
+    declaredTags.set(entry.name, tag);
+  }
+  const names = topFunctions.map((entry) => entry.name);
+  const distMap = computeAllPairsLongestPaths(names, callGraph);
+  const boundsMap = computeTierBounds(names, distMap, declaredTags);
+  return topFunctions.map((entry) => {
+    const tagVal = declaredTags.get(entry.name);
+    const callers = names.filter((caller) => (callGraph.get(caller) ?? new Set()).has(entry.name)).sort();
+    const callees = [...(callGraph.get(entry.name) ?? new Set())].sort();
+    return {
+      name: entry.name,
+      start_line: entry.startLine,
+      end_line: entry.endLine,
+      line_count: entry.endLine - entry.startLine + 1,
+      declared_tier: tagVal !== null ? `L${tagVal}` : null,
+      valid_tiers: boundsMap.get(entry.name).validTiers,
+      callers,
+      callees,
+    };
+  });
+}
+
 export function checkSourceWithAst(source, filePath, tsMod) {
   const isJsx = /\.[jt]sx$/i.test(filePath);
-  const { cleaned, comments } = lexSource(source, isJsx);
+  const { cleaned, comments, commentLines, lineCommentLines } = lexSource(source, isJsx);
   const { directives, ignoreViolations } = parseIgnoreDirectives(comments, filePath);
   const sf = tsMod.createSourceFile(filePath, source, tsMod.ScriptTarget.Latest, true);
   const topFunctions = collectTopLevelAstFunctions(sf, tsMod);
   const memberFunctions = collectAstMemberFunctions(sf, tsMod);
   const allFunctions = [...topFunctions, ...memberFunctions];
+  const rawLines = source.split("\n");
+  const cleanedLines = cleaned.split("\n");
   const rawViolations = [
-    ...checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath),
-    ...checkAstFunctionRules(allFunctions, sf, tsMod, filePath),
-    ...checkImplicitStateMachines(cleaned.split(/\r?\n/), filePath, directives),
-    ...checkTestRunnerBranching(source, cleaned.split(/\r?\n/), filePath),
+    ...checkAstOrderAndDepth(topFunctions, filePath, tsMod),
+    ...checkAstTierTags(topFunctions, filePath, { rawLines, lineCommentLines, commentLines, tsMod }),
+    ...checkAstFunctionRules(allFunctions, { sf, tsMod, filePath }),
+    ...checkImplicitStateMachines(cleanedLines, filePath, { directives, rawLines, commentLines }),
+    ...checkTestRunnerBranching(source, cleanedLines, filePath),
   ];
   const spans = allFunctions.map((entry) => ({ startLine: entry.startLine, endLine: entry.endLine }));
-  const kept = filterSuppressed(rawViolations, spans, directives);
+  const kept = filterSuppressed(rawViolations, spans, { directives, rawLines, commentLines });
   return [...ignoreViolations, ...kept].sort(
     (left, right) => left.line - right.line || left.rule.localeCompare(right.rule),
   );
@@ -206,17 +272,18 @@ function buildSafeTsFunctionSpans(fnPositions, sf, sourceLines) {
 
 export function checkSource(source, filePath) {
   const isJsx = /\.[jt]sx$/i.test(filePath);
-  const { cleaned, comments } = lexSource(source, isJsx);
+  const { cleaned, comments, commentLines } = lexSource(source, isJsx);
   const { directives, ignoreViolations } = parseIgnoreDirectives(comments, filePath);
-  const lines = cleaned.split(/\r?\n/);
+  const lines = cleaned.split("\n");
+  const rawLines = source.split("\n");
   const functions = extractFunctions(lines);
   const rawViolations = [
     ...checkFunctionBlocks(functions, lines, filePath),
     ...checkTernariesAndEmptyCatches(cleaned, lines, filePath),
-    ...checkImplicitStateMachines(lines, filePath, directives),
+    ...checkImplicitStateMachines(lines, filePath, { directives, rawLines, commentLines }),
     ...checkTestRunnerBranching(source, lines, filePath),
   ];
-  const kept = filterSuppressed(rawViolations, functions, directives);
+  const kept = filterSuppressed(rawViolations, functions, { directives, rawLines, commentLines });
   return [...ignoreViolations, ...kept].sort(
     (left, right) => left.line - right.line || left.rule.localeCompare(right.rule),
   );
@@ -243,7 +310,7 @@ function checkFunctionBlocks(functions, lines, filePath) {
         message: `Control-flow nesting depth ${maxNesting} (max ${MAX_NESTING_DEPTH}) -> invert with early return/continue or extract an L2 predicate.`,
       });
     }
-    violations.push(...findNestedFunctions(lines, fnSpan.bodyStartLine, fnSpan.endLine, filePath));
+    violations.push(...findNestedFunctions(lines, fnSpan, filePath));
   }
   return violations;
 }
@@ -272,7 +339,7 @@ function checkTernariesAndEmptyCatches(cleaned, lines, filePath) {
   return violations;
 }
 
-function checkImplicitStateMachines(lines, filePath, directives) {
+function checkImplicitStateMachines(lines, filePath, { directives, rawLines, commentLines }) {
   const violations = [];
   const scopeStack = [];
   const closedScopes = [];
@@ -291,7 +358,7 @@ function checkImplicitStateMachines(lines, filePath, directives) {
     const opens = countChar(lineText, "{");
     const closes = countChar(lineText, "}");
     const isControl = CONTROL_OPEN_PATTERN.test(lineText);
-    for (let k = 0; k < opens; k += 1) {
+    for (let openIdx = 0; openIdx < opens; openIdx += 1) {
       scopeStack.push({
         startLine: pendingStart !== -1 ? pendingStart : lineNo,
         openLine: lineNo,
@@ -307,7 +374,7 @@ function checkImplicitStateMachines(lines, filePath, directives) {
       pendingFlags.push(...matched);
     }
     const popCount = Math.min(closes, scopeStack.length);
-    for (let k = 0; k < popCount; k += 1) {
+    for (let closeIdx = 0; closeIdx < popCount; closeIdx += 1) {
       const popped = scopeStack.pop();
       const targetFlags = popped.isControl && scopeStack.length > 0 ? scopeStack[scopeStack.length - 1].flags : popped.flags;
       targetFlags.push(...(targetFlags !== popped.flags ? popped.flags : []));
@@ -320,7 +387,13 @@ function checkImplicitStateMachines(lines, filePath, directives) {
   }
   for (const scope of closedScopes) {
     const uniqueFlags = [...new Set(scope.flags)];
-    if (uniqueFlags.length >= 2 && !isScopeSuppressed(scope, directives)) {
+    const leading = collectContiguousHeaderLines(rawLines, scope.startLine, { prevEndLine: 0, commentLines });
+    const headerLines = [...leading, ...Array.from({ length: scope.openLine - scope.startLine + 1 }, (_, offset) => scope.startLine + offset)];
+    const isSuppressed = headerLines.some((lineNo) => {
+      const directive = directives.get(lineNo);
+      return Boolean(directive && directive.hasReason && (directive.isWildcard || directive.rules.has("CANON-03")));
+    });
+    if (uniqueFlags.length >= 2 && !isSuppressed) {
       violations.push({
         path: filePath,
         line: scope.openLine,
@@ -330,16 +403,6 @@ function checkImplicitStateMachines(lines, filePath, directives) {
     }
   }
   return violations;
-}
-
-function isScopeSuppressed(scope, directives) {
-  for (let lineNo = scope.startLine - 1; lineNo <= scope.openLine; lineNo += 1) {
-    const directive = directives.get(lineNo);
-    if (directive && directive.hasReason && (directive.isWildcard || directive.rules.has("CANON-03"))) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function checkTestRunnerBranching(source, cleanedLines, filePath) {
@@ -367,6 +430,7 @@ function parseCliArgs(rawArgs) {
   let asJson = false;
   let applyFix = false;
   let dryRun = false;
+  let outline = false;
   let showBackend = false;
   let backend = "auto";
   const paths = [];
@@ -383,6 +447,10 @@ function parseCliArgs(rawArgs) {
       dryRun = true;
       continue;
     }
+    if (token === "--outline") {
+      outline = true;
+      continue;
+    }
     if (token === "--show-backend") {
       showBackend = true;
       continue;
@@ -396,7 +464,10 @@ function parseCliArgs(rawArgs) {
     }
     paths.push(token);
   }
-  return paths.length > 0 ? { paths, asJson, applyFix, dryRun, showBackend, backend } : null;
+  if (paths.length === 0 || (outline && (applyFix || dryRun))) {
+    return null;
+  }
+  return { paths, asJson, applyFix, dryRun, outline, showBackend, backend };
 }
 
 function collectTargetFiles(rawPaths) {
@@ -470,7 +541,16 @@ function parseIgnoreDirectives(comments, filePath) {
 }
 
 function lexSource(source, isJsx = false) {
-  const state = { out: "", comments: [], line: 1, idx: 0, lastToken: "", exprBraceStack: [] };
+  const state = {
+    out: "",
+    comments: [],
+    rawLineComments: new Set(),
+    rawAllComments: new Set(),
+    line: 1,
+    idx: 0,
+    lastToken: "",
+    exprBraceStack: [],
+  };
   while (state.idx < source.length) {
     const ch = source[state.idx];
     const next = source[state.idx + 1] ?? "";
@@ -507,7 +587,12 @@ function lexSource(source, isJsx = false) {
     }
     advanceCodeChar(source, state, ch);
   }
-  return { cleaned: state.out, comments: state.comments };
+  const cleanedLines = state.out.split("\n");
+  const commentLines = new Set(
+    [...state.rawAllComments].filter((ln) => ln >= 1 && ln <= cleanedLines.length && cleanedLines[ln - 1].trim() === ""),
+  );
+  const lineCommentLines = new Set([...state.rawLineComments].filter((ln) => commentLines.has(ln)));
+  return { cleaned: state.out, comments: state.comments, commentLines, lineCommentLines };
 }
 
 function consumeLineComment(source, state) {
@@ -517,19 +602,24 @@ function consumeLineComment(source, state) {
     state.idx += 1;
   }
   state.comments.push({ line: startLine, text: source.slice(start, state.idx) });
+  state.rawLineComments.add(startLine);
+  state.rawAllComments.add(startLine);
 }
 
 function consumeBlockComment(source, state) {
   state.idx += 2;
+  state.rawAllComments.add(state.line);
   while (state.idx < source.length) {
     const ch = source[state.idx];
     if (ch === "*" && source[state.idx + 1] === "/") {
+      state.rawAllComments.add(state.line);
       state.idx += 2;
       return;
     }
     if (ch === "\n") {
       state.out += "\n";
       state.line += 1;
+      state.rawAllComments.add(state.line);
     }
     state.idx += 1;
   }
@@ -725,9 +815,9 @@ function measureControlNesting(lines, bodyStartLine, endLine) {
   return maxNesting;
 }
 
-function findNestedFunctions(lines, bodyStartLine, endLine, filePath) {
+function findNestedFunctions(lines, fnSpan, filePath) {
   const violations = [];
-  for (let lineNo = bodyStartLine + 1; lineNo <= endLine; lineNo += 1) {
+  for (let lineNo = fnSpan.bodyStartLine + 1; lineNo <= fnSpan.endLine; lineNo += 1) {
     if (/\bfunction\s+[A-Za-z_$]/.test(lines[lineNo - 1])) {
       violations.push({
         path: filePath,
@@ -740,14 +830,25 @@ function findNestedFunctions(lines, bodyStartLine, endLine, filePath) {
   return violations;
 }
 
-function filterSuppressed(violations, functions, directives) {
+function filterSuppressed(violations, functions, { directives, rawLines, commentLines }) {
+  const allEndLines = functions.map((fnSpan) => fnSpan.endLine);
+  const spanHeaders = functions.map((fnSpan) => {
+    const prevEnd = Math.max(0, ...allEndLines.filter((end) => end < fnSpan.startLine));
+    const leading = collectContiguousHeaderLines(rawLines, fnSpan.startLine, {
+      prevEndLine: prevEnd,
+      commentLines,
+    });
+    leading.add(fnSpan.startLine);
+    return { startLine: fnSpan.startLine, endLine: fnSpan.endLine, headerLines: leading };
+  });
+  const declStartLines = new Set(spanHeaders.map((span) => span.startLine));
   return violations.filter((entry) => {
-    const candidateLines = new Set([entry.line, entry.line - 1]);
-    for (const fnSpan of functions) {
-      if (fnSpan.startLine <= entry.line && entry.line <= fnSpan.endLine) {
-        candidateLines.add(fnSpan.startLine);
-        candidateLines.add(fnSpan.startLine - 1);
-      }
+    const matchedLines = spanHeaders
+      .filter((span) => span.startLine <= entry.line && entry.line <= span.endLine)
+      .flatMap((span) => [...span.headerLines]);
+    const candidateLines = new Set([entry.line, ...matchedLines]);
+    if (commentLines.has(entry.line - 1) && !declStartLines.has(entry.line)) {
+      candidateLines.add(entry.line - 1);
     }
     for (const lineNo of candidateLines) {
       const directive = directives.get(lineNo);
@@ -837,7 +938,7 @@ function collectAstMemberFunctions(sf, tsMod) {
   return members;
 }
 
-function checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath) {
+function checkAstOrderAndDepth(topFunctions, filePath, tsMod) {
   const violations = [];
   const nameToLine = new Map(topFunctions.map((entry) => [entry.name, entry.startLine]));
   const nameSet = new Set(nameToLine.keys());
@@ -871,7 +972,83 @@ function checkAstOrderAndDepth(topFunctions, sf, tsMod, filePath) {
   return violations;
 }
 
-function checkAstFunctionRules(topFunctions, sf, tsMod, filePath) {
+function checkAstTierTags(topFunctions, filePath, { rawLines, lineCommentLines, commentLines, tsMod }) {
+  const violations = [];
+  const allEndLines = topFunctions.map((entry) => entry.endLine);
+  const nameSet = new Set(topFunctions.map((entry) => entry.name));
+  const callGraph = new Map();
+  const declaredTags = new Map();
+  for (const entry of topFunctions) {
+    const callees = collectAstCalls(entry.node, nameSet, tsMod);
+    callees.delete(entry.name);
+    callGraph.set(entry.name, callees);
+    const prevEnd = Math.max(0, ...allEndLines.filter((end) => end < entry.startLine));
+    const leading = collectContiguousHeaderLines(rawLines, entry.startLine, {
+      prevEndLine: prevEnd,
+      commentLines,
+    });
+    const { tag, hasMultiple } = extractAstTierTags(rawLines, leading, lineCommentLines);
+    declaredTags.set(entry.name, tag);
+    if (hasMultiple) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-01",
+        message: `'${entry.name}' has multiple tier tags -> keep a single [L0]..[L3] tag.`,
+      });
+    }
+  }
+  const names = topFunctions.map((entry) => entry.name);
+  const distMap = computeAllPairsLongestPaths(names, callGraph);
+  const boundsMap = computeTierBounds(names, distMap, declaredTags);
+  for (const entry of topFunctions) {
+    const tagVal = declaredTags.get(entry.name);
+    if (tagVal === null || tagVal === undefined) {
+      continue;
+    }
+    const { dMax, height, lb0, ub0, isAdapter } = boundsMap.get(entry.name);
+    const valid0 = [0, 1, 2, 3].filter((tier) => lb0 <= tier && tier <= ub0).map((tier) => `[L${tier}]`);
+    if (tagVal === 3 && height > 0) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-01",
+        message: `'${entry.name}' is tagged [L3] (leaf) but calls local functions -> update tag or move local calls to L1/L2.`,
+      });
+    } else if (tagVal < lb0 || tagVal > ub0) {
+      const message =
+        valid0.length > 0
+          ? `'${entry.name}' is tagged [L${tagVal}] outside valid tier range (${valid0.join(", ")}) for depth ${dMax} and height ${height} -> update tier tag.`
+          : `'${entry.name}' is tagged [L${tagVal}] in a call chain exceeding L0->L3 ceiling (depth ${dMax}, height ${height}) -> flatten call depth.`;
+      violations.push({ path: filePath, line: entry.startLine, rule: "CANON-01", message });
+    }
+    const badAnc = names.find((anc) => {
+      const ancTag = declaredTags.get(anc);
+      const dist = distMap.get(`${anc}->${entry.name}`);
+      return (
+        anc !== entry.name &&
+        ancTag !== null &&
+        ancTag !== undefined &&
+        dist !== undefined &&
+        !(dist === 1 && ancTag === 0 && tagVal === 0 && isAdapter) &&
+        tagVal - ancTag < dist
+      );
+    });
+    if (badAnc) {
+      const ancTag = declaredTags.get(badAnc);
+      const ancDist = distMap.get(`${badAnc}->${entry.name}`);
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-01",
+        message: `'${entry.name}' is tagged [L${tagVal}] at call distance ${ancDist} below '${badAnc}' ([L${ancTag}]) -> callee tier must be at least [L${ancTag + ancDist}].`,
+      });
+    }
+  }
+  return violations;
+}
+
+function checkAstFunctionRules(topFunctions, { sf, tsMod, filePath }) {
   const violations = [];
   for (const entry of topFunctions) {
     const length = entry.endLine - entry.startLine + 1;
@@ -899,12 +1076,12 @@ function checkAstFunctionRules(topFunctions, sf, tsMod, filePath) {
         message: `'${entry.name}' has ${entry.node.parameters.length} params (max ${MAX_POSITIONAL_ARGS}) -> group extras into a destructured options object.`,
       });
     }
-    violations.push(...scanAstFunctionBody(entry, sf, tsMod, filePath));
+    violations.push(...scanAstFunctionBody(entry, { sf, tsMod, filePath }));
   }
   return violations;
 }
 
-function scanAstFunctionBody(entry, sf, tsMod, filePath) {
+function scanAstFunctionBody(entry, { sf, tsMod, filePath }) {
   const violations = [];
   let maxNesting = 0;
   const stack = [{ node: entry.node.body, depth: 0 }];
@@ -961,7 +1138,9 @@ function collectAstCalls(fnNode, nameSet, tsMod) {
     if (tsMod.isCallExpression(current) && tsMod.isIdentifier(current.expression) && nameSet.has(current.expression.text)) {
       callees.add(current.expression.text);
     }
-    current.forEachChild((child) => stack.push(child));
+    current.forEachChild((child) => {
+      stack.push(child);
+    });
   }
   return callees;
 }
@@ -1015,6 +1194,133 @@ function topoSortAstFunctions(fnPositions, callGraph) {
     ready.push(...edges[current].filter((neighbor) => inDegree[neighbor] === 0));
   }
   return ordered.length === fnPositions.length ? ordered : null;
+}
+
+function readFileText(filePath) {
+  try {
+    return { source: fs.readFileSync(filePath, "utf8"), error: null };
+  } catch (err) {
+    return { source: "", error: `Error reading ${filePath}: ${err.message}` };
+  }
+}
+
+function formatOutlineText(payload) {
+  const blocks = [];
+  for (const fileEntry of payload) {
+    const lines = [fileEntry.path];
+    if (!Array.isArray(fileEntry.functions) || fileEntry.functions.length === 0) {
+      lines.push("  (no top-level functions)");
+      blocks.push(lines.join("\n"));
+      continue;
+    }
+    for (const fnInfo of fileEntry.functions) {
+      const valid = fnInfo.valid_tiers;
+      const rangeBadge = valid.length > 1 ? `[${valid[0]}..${valid[valid.length - 1]}]` : "[invalid]";
+      const inferredBadge = valid.length === 1 ? `[${valid[0]}]` : rangeBadge;
+      const badge = fnInfo.declared_tier ? `[${fnInfo.declared_tier}]` : inferredBadge;
+      const callersPart = fnInfo.callers.length > 0 ? ` <- ${fnInfo.callers.join(", ")}` : "";
+      const calleesPart = fnInfo.callees.length > 0 ? ` -> ${fnInfo.callees.join(", ")}` : "";
+      const span = `(L${fnInfo.start_line}-L${fnInfo.end_line}, ${fnInfo.line_count}L)`;
+      lines.push(`  ${badge} ${fnInfo.name} ${span}${callersPart}${calleesPart}`);
+    }
+    blocks.push(lines.join("\n"));
+  }
+  return blocks.join("\n");
+}
+
+function collectContiguousHeaderLines(rawLines, outerStart, { prevEndLine, commentLines }) {
+  const collected = new Set();
+  let lineNo = outerStart - 1;
+  while (lineNo > prevEndLine && lineNo >= 1) {
+    const trimmed = (rawLines[lineNo - 1] ?? "").trim();
+    const isDecorator = trimmed.startsWith("@");
+    const isFileHeader = lineNo === 1 && TS_HEADER_COMMENT_PATTERN.test(trimmed);
+    if ((!commentLines.has(lineNo) && !isDecorator) || isFileHeader) {
+      break;
+    }
+    collected.add(lineNo);
+    lineNo -= 1;
+  }
+  return collected;
+}
+
+function extractAstTierTags(rawLines, headerLines, lineCommentLines) {
+  const matched = [...headerLines]
+    .filter((lineNo) => lineCommentLines.has(lineNo))
+    .sort((left, right) => left - right)
+    .map((lineNo) => TIER_TAG_PATTERN.exec(rawLines[lineNo - 1] ?? ""))
+    .filter(Boolean)
+    .map((match) => Number(match[1]));
+  if (matched.length > 1) {
+    return { tag: null, hasMultiple: true };
+  }
+  return { tag: matched.length === 1 ? matched[0] : null, hasMultiple: false };
+}
+
+function computeAllPairsLongestPaths(names, callGraph) {
+  const dist = new Map();
+  const stack = [];
+  for (const src of names) {
+    const callees = [...(callGraph.get(src) ?? [])].filter((dst) => dst !== src);
+    stack.push(...callees.map((dst) => ({ src, current: dst, length: 1, visited: new Set([src, dst]) })));
+  }
+  while (stack.length > 0) {
+    const { src, current, length, visited } = stack.pop();
+    const key = `${src}->${current}`;
+    if (length > (dist.get(key) ?? 0)) {
+      dist.set(key, length);
+    }
+    const nextNodes = [...(callGraph.get(current) ?? [])].filter(
+      (nxt) => !visited.has(nxt) && length + 1 > (dist.get(`${src}->${nxt}`) ?? 0),
+    );
+    for (const nxt of nextNodes) {
+      stack.push({ src, current: nxt, length: length + 1, visited: new Set([...visited, nxt]) });
+    }
+  }
+  return dist;
+}
+
+function computeTierBounds(names, distMap, declaredTags) {
+  const dMaxMap = new Map();
+  const heightMap = new Map();
+  for (const name of names) {
+    const incoming = names.map((src) => distMap.get(`${src}->${name}`) ?? 0);
+    const outgoing = names.map((dst) => distMap.get(`${name}->${dst}`) ?? 0);
+    dMaxMap.set(name, Math.max(0, ...incoming));
+    heightMap.set(name, Math.max(0, ...outgoing));
+  }
+  const l0Adapters = new Set(
+    names.filter(
+      (name) =>
+        heightMap.get(name) === 0 &&
+        dMaxMap.get(name) === 1 &&
+        names
+          .filter((caller) => distMap.get(`${caller}->${name}`) === 1)
+          .every((caller) => dMaxMap.get(caller) === 0 && (declaredTags.get(caller) === 0 || declaredTags.get(caller) === null)),
+    ),
+  );
+  const bounds = new Map();
+  for (const name of names) {
+    const isAdapter = l0Adapters.has(name);
+    const lb0 = isAdapter ? 0 : dMaxMap.get(name);
+    const ub0 = 3 - heightMap.get(name);
+    const ancLbs = names
+      .filter((anc) => anc !== name && declaredTags.get(anc) !== null && distMap.has(`${anc}->${name}`))
+      .filter((anc) => !(distMap.get(`${anc}->${name}`) === 1 && declaredTags.get(anc) === 0 && isAdapter))
+      .map((anc) => declaredTags.get(anc) + distMap.get(`${anc}->${name}`));
+    const descUbs = names
+      .filter((desc) => desc !== name && declaredTags.get(desc) !== null && distMap.has(`${name}->${desc}`))
+      .map((desc) =>
+        distMap.get(`${name}->${desc}`) === 1 && declaredTags.get(desc) === 0 && l0Adapters.has(desc)
+          ? 0
+          : declaredTags.get(desc) - distMap.get(`${name}->${desc}`),
+      );
+    const lb = Math.max(lb0, ...ancLbs);
+    const ub = Math.min(ub0, ...descUbs);
+    const validTiers = [0, 1, 2, 3].filter((tier) => lb <= tier && tier <= ub).map((tier) => `L${tier}`);
+    bounds.set(name, { dMax: dMaxMap.get(name), height: heightMap.get(name), lb0, ub0, isAdapter, validTiers });
+  }
+  return bounds;
 }
 
 const isEntryPoint =

@@ -11,6 +11,7 @@ const VIP_FEE_BPS: i64 = 100;
 const STANDARD_FEE_BPS: i64 = 250;
 const SMALL_PAYOUT_THRESHOLD_CENTS: i64 = 5_000;
 
+// [L0] Orchestrator
 pub fn process_payout_batch(
     requests: &[PayoutRequest],
     is_vip: bool,
@@ -22,6 +23,7 @@ pub fn process_payout_batch(
     Ok(settle_eligible_payouts(requests, is_vip, min_fee_cents))
 }
 
+// [L1] Pure Workflow
 fn settle_eligible_payouts(
     requests: &[PayoutRequest],
     is_vip: bool,
@@ -40,6 +42,7 @@ fn settle_eligible_payouts(
     summaries
 }
 
+// [L2] Pure Rule
 fn calculate_fee_cents(gross_cents: i64, is_vip: bool, min_fee_cents: i64) -> i64 {
     if is_vip {
         return (gross_cents * VIP_FEE_BPS) / 10_000;
@@ -50,6 +53,7 @@ fn calculate_fee_cents(gross_cents: i64, is_vip: bool, min_fee_cents: i64) -> i6
     (gross_cents * STANDARD_FEE_BPS) / 10_000
 }
 
+// [L3] Leaf Primitive
 fn format_cents_usd(amount_cents: i64) -> String {
     format!("${:.2}", amount_cents as f64 / 100.0)
 }

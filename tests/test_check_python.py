@@ -539,6 +539,120 @@ class TestCheckPython(unittest.TestCase):
         self.assertEqual(check_python.check_source(nested_classes_separate, "nested.py"), [])
         self.assertEqual([v.line for v in check_python.check_source(class_ignore_does_not_hide_method, "cls.py")], [5])
 
+    def test_tier_signposts_verified_and_stacked_ignore_supported(self) -> None:
+        import check_python
+
+        valid_with_l0_adapter = (
+            "# [L0] Orchestrator\n"
+            "def run_job(job_id: str) -> str:\n"
+            "    raw = fetch_payload(job_id)\n"
+            "    return transform_payload(raw)\n\n"
+            "# [L0] I/O Adapter Leaf\n"
+            "def fetch_payload(job_id: str) -> str:\n"
+            "    return job_id\n\n"
+            "# [L1] Pure Workflow\n"
+            "def transform_payload(raw: str) -> str:\n"
+            "    return normalize_text(raw)\n\n"
+            "# [L3] Leaf Primitive\n"
+            "def normalize_text(raw: str) -> str:\n"
+            "    return raw.strip()\n"
+        )
+        non_leaf_l3 = (
+            "# [L3] Wrong tag on caller\n"
+            "def caller(count: int) -> int:\n"
+            "    return leaf(count)\n\n"
+            "def leaf(count: int) -> int:\n"
+            "    return count + 1\n"
+        )
+        gap_compressed = (
+            "# [L1] Workflow\n"
+            "def step_one(count: int) -> int:\n"
+            "    return step_two(count)\n\n"
+            "def step_two(count: int) -> int:\n"
+            "    return step_three(count)\n\n"
+            "# [L2] Impossible tier after untagged intermediate\n"
+            "def step_three(count: int) -> int:\n"
+            "    return count + 1\n"
+        )
+        duplicate_tags = (
+            "# [L0] First\n"
+            "# [L1] Second\n"
+            "def solo(count: int) -> int:\n"
+            "    return count\n"
+        )
+        stacked_ignore = (
+            '# topdown-ignore(CANON-05, reason="migrating from [L1] state machine")\n'
+            "# [L0] Entrypoint\n"
+            "def pick(flag_a: bool, flag_b: bool) -> str:\n"
+            '    return "a" if flag_a else ("b" if flag_b else "c")\n'
+        )
+        self.assertEqual(check_python.check_source(valid_with_l0_adapter, "ok.py"), [])
+        self.assertIn("CANON-01", [v.rule for v in check_python.check_source(non_leaf_l3, "l3.py")])
+        self.assertIn("CANON-01", [v.rule for v in check_python.check_source(gap_compressed, "gap.py")])
+        self.assertIn("CANON-01", [v.rule for v in check_python.check_source(duplicate_tags, "dup.py")])
+        self.assertEqual(check_python.check_source(stacked_ignore, "stack.py"), [])
+        l1_calling_l0 = (
+            "# [L1] Pure Workflow\n"
+            "def workflow(count: int) -> int:\n"
+            "    return leaf(count)\n\n"
+            "# [L0] Invalid L0 below L1\n"
+            "def leaf(count: int) -> int:\n"
+            "    return count + 1\n"
+        )
+        self.assertIn("CANON-01", [v.rule for v in check_python.check_source(l1_calling_l0, "l1_l0.py")])
+        no_adjacent_start_leak = (
+            'def first() -> int: return 1  # topdown-ignore(CANON-05, reason="only first")\n'
+            "def second(flag_a: bool, flag_b: bool, flag_c: bool) -> int:\n"
+            "    if flag_a:\n"
+            "        if flag_b:\n"
+            "            if flag_c:\n"
+            "                return 1\n"
+            "    return 0\n"
+        )
+        self.assertIn("CANON-05", [v.rule for v in check_python.check_source(no_adjacent_start_leak, "leak.py")])
+        deep_outline = (
+            "def f0(v: int) -> int:\n    return f1(v)\n"
+            "def f1(v: int) -> int:\n    return f2(v)\n"
+            "def f2(v: int) -> int:\n    return f3(v)\n"
+            "def f3(v: int) -> int:\n    return f4(v)\n"
+            "def f4(v: int) -> int:\n    return v\n"
+        )
+        outline_rows = check_python.build_file_outline(deep_outline, "deep.py")
+        self.assertEqual(outline_rows[2]["valid_tiers"], [])
+        self.assertIn("[invalid] f2", check_python.format_outline_text([{"path": "deep.py", "functions": outline_rows}]))
+
+    def test_outline_cli_text_and_json_and_flag_conflicts(self) -> None:
+        checker = ROOT_DIR / "enforcement" / "check_python.py"
+        after_fixture = ROOT_DIR / "examples" / "fixtures" / "python_after.py"
+        text_proc = subprocess.run(
+            [sys.executable, str(checker), "--outline", str(after_fixture)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(text_proc.returncode, 0, msg=text_proc.stderr)
+        self.assertIn("[L0] process_payout_batch (L37-L55, 19L) -> format_cents_usd, settle_eligible_payouts", text_proc.stdout)
+        self.assertIn("[L1] settle_eligible_payouts (L59-L79, 21L) <- process_payout_batch -> calculate_fee_cents, format_cents_usd", text_proc.stdout)
+
+        json_proc = subprocess.run(
+            [sys.executable, str(checker), "--outline", "--json", str(after_fixture)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(json_proc.returncode, 0, msg=json_proc.stderr)
+        payload = json.loads(json_proc.stdout)
+        self.assertEqual(len(payload), 1)
+        funcs = payload[0]["functions"]
+        self.assertEqual(funcs[0]["name"], "process_payout_batch")
+        self.assertEqual(funcs[0]["declared_tier"], "L0")
+        self.assertEqual(funcs[0]["valid_tiers"], ["L0"])
+
+        conflict_proc = subprocess.run(
+            [sys.executable, str(checker), "--outline", "--fix", str(after_fixture)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(conflict_proc.returncode, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

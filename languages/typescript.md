@@ -40,7 +40,7 @@ export default [{ rules: {
 ## 3. Structural Checker
 
 ```bash
-node enforcement/check_ts.mjs [--backend=auto|ast|heuristic] [--fix] [--dry-run] src/
+node enforcement/check_ts.mjs [--backend=auto|ast|heuristic] [--fix] [--dry-run] [--outline] [--json] src/
 ```
 
-Uses optional `typescript` AST (`ts.createSourceFile`) when installed for full parity + safe-subset `--fix` on hoisted `function` declarations; falls back to zero-dep heuristics otherwise.
+Uses optional `typescript` AST (`ts.createSourceFile`) when installed for full parity + `[L0]..[L3]` tier tag verification + `--outline` X-Ray + safe-subset `--fix` on hoisted `function` declarations; falls back to zero-dep heuristics otherwise.

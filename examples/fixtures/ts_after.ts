@@ -28,6 +28,7 @@ const VIP_FEE_BPS = 100;
 const STANDARD_FEE_BPS = 250;
 const SMALL_PAYOUT_THRESHOLD_CENTS = 5_000;
 
+// [L0] Orchestrator
 export function processPayoutBatch(
   requests: readonly PayoutRequest[],
   options: PayoutOptions,
@@ -41,6 +42,7 @@ export function processPayoutBatch(
   };
 }
 
+// [L1] Pure Workflow
 function settleEligiblePayouts(
   requests: readonly PayoutRequest[],
   options: PayoutOptions,
@@ -62,6 +64,7 @@ function settleEligiblePayouts(
   return settled;
 }
 
+// [L2] Pure Rule
 function calculateFeeCents(grossCents: number, options: PayoutOptions): number {
   if (options.tier === "vip") {
     return Math.floor((grossCents * VIP_FEE_BPS) / 10_000);
@@ -72,6 +75,7 @@ function calculateFeeCents(grossCents: number, options: PayoutOptions): number {
   return Math.floor((grossCents * STANDARD_FEE_BPS) / 10_000);
 }
 
+// [L3] Leaf Primitive
 function formatCentsUsd(amountCents: number): string {
   return `$${(amountCents / 100).toFixed(2)}`;
 }

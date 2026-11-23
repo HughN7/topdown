@@ -25,8 +25,9 @@ Topdown stays effective by staying **small, opinionated, and zero-dependency**. 
 ## Adding or Updating Enforcement Checkers
 
 - Keep `enforcement/` checkers zero-dependency by default (optional AST backends like `typescript` must fall back gracefully unless `--backend=ast` is explicitly requested).
-- To add a new language to the optional universal `tree-sitter` engine, add a single `LanguageSpec` entry to [`engine/specs.py`](engine/specs.py) and a test case in `tests/test_engine.py`.
-- **Safe `--fix` rule:** Only implement `--fix` / `--dry-run` on AST-backed checkers; never rewrite user source code from regex/brace heuristics.
+- To add a new language to the optional universal `tree-sitter` engine, add a single `LanguageSpec` entry to [`engine/specs.py`](engine/specs.py) (`function_nodes`, `call_nodes`, `comment_nodes` automatically enable `[L0..L3]` tier tag verification and `topdown --outline`) and a test case in `tests/test_engine.py`.
+- **AST-only call-graph rule (`--fix`, `--outline`, `[L0..L3]` verification):** Only implement `--fix` / `--dry-run`, `--outline`, and `[L0..L3]` tier verification on AST-backed checkers (`check_python.py`, `check_ts.mjs --backend=ast`, `engine/`); never rewrite source code or guess call graphs from regex/brace heuristics.
+- **Contiguous header rule (all checkers):** Every checker's `filter_suppressed` must walk contiguous leading comments, `[L0..L3]` signposts, JSDoc/rustdoc block comments, and outer attributes/decorators (`#[...]`, `@decorator`) above a declaration so stacking `topdown-ignore` and `[L0..L3]` works uniformly across AST and heuristic paths.
 - Add unit tests in `tests/` and idiomatic zero-waiver cases in `tests/positive_witness/`.
 - **Dogfood everything before opening a PR:**
 

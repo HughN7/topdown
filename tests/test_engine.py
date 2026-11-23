@@ -248,6 +248,61 @@ class TestUniversalEngine(unittest.TestCase):
             self.assertEqual(len(violations), 3)
             self.assertFalse(any("capital" in entry.message for entry in violations))
 
+    def test_tier_signposts_and_outline_across_languages(self) -> None:
+        from engine.analyzer import analyze_source, outline_source
+
+        ts_bad_l3 = (
+            "// [L3] Wrong leaf tag\n"
+            "/**\n"
+            " * Multi-line JSDoc comment\n"
+            " */\n"
+            "export function caller(amount: number): number {\n"
+            "  return leaf(amount);\n"
+            "}\n"
+            "function leaf(amount: number): number {\n"
+            "  return amount + 1;\n"
+            "}\n"
+        )
+        rust_stacked_ignore = (
+            '// topdown-ignore(CANON-05, reason="legacy [L1] branch")\n'
+            "// [L0] Entrypoint\n"
+            "#[inline]\n"
+            "pub fn check(a: bool, b: bool, c: bool) -> i32 {\n"
+            "    if a { if b { if c { return 1; } } }\n"
+            "    0\n"
+            "}\n"
+        )
+        self.assertIn("CANON-01", [v.rule for v in analyze_source(ts_bad_l3, "bad.ts")])
+        self.assertEqual(analyze_source(rust_stacked_ignore, "ok.rs"), [])
+        rust_adjacent_leak = (
+            'pub fn first() -> i32 { 1 } // topdown-ignore(CANON-05, reason="only first")\n'
+            "pub fn second(a: bool, b: bool, c: bool) -> i32 {\n"
+            "    if a { if b { if c { return 1; } } }\n"
+            "    0\n"
+            "}\n"
+        )
+        self.assertIn("CANON-05", [v.rule for v in analyze_source(rust_adjacent_leak, "leak.rs")])
+
+        ts_after = (ROOT_DIR / "examples" / "fixtures" / "ts_after.ts").read_text(encoding="utf-8")
+        outline_entries = outline_source(ts_after, "ts_after.ts")
+        self.assertEqual([e["name"] for e in outline_entries], [
+            "processPayoutBatch",
+            "settleEligiblePayouts",
+            "calculateFeeCents",
+            "formatCentsUsd",
+        ])
+        self.assertEqual(outline_entries[0]["declared_tier"], "L0")
+        self.assertEqual(outline_entries[0]["valid_tiers"], ["L0"])
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "engine.cli", "--outline", str(ROOT_DIR / "examples" / "fixtures" / "python_after.py")],
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertIn("[L0] process_payout_batch (L37-L55, 19L) -> format_cents_usd, settle_eligible_payouts", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

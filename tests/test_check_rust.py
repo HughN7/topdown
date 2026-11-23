@@ -304,6 +304,34 @@ class TestCheckRust(unittest.TestCase):
         )
         self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(branch_fn, "branch.rs")])
 
+    def test_stacked_topdown_ignore_above_tier_tag_and_attributes(self) -> None:
+        import check_rust
+
+        stacked_fn = (
+            '// topdown-ignore(LLM-02, reason="legacy [L1] entrypoint")\n'
+            "// [L0] Entrypoint\n"
+            "/** Rustdoc block */\n"
+            "#[inline]\n"
+            "pub fn load(opt: Option<i64>) -> i64 {\n"
+            "    opt.unwrap()\n"
+            "}\n"
+        )
+        no_adjacent_leak = (
+            'pub fn first() -> i64 { 1 } // topdown-ignore(CANON-05, reason="only first")\n'
+            "pub fn second(a: bool, b: bool, c: bool) -> i64 {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            if c {\n"
+            "                return 1;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        self.assertEqual(check_rust.check_source(stacked_fn, "stacked.rs"), [])
+        self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(no_adjacent_leak, "leak.rs")])
+
 
 if __name__ == "__main__":
     unittest.main()

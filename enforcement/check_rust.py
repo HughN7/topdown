@@ -83,18 +83,24 @@ def main() -> int:
 
 
 def check_source(source: str, file_path: str) -> list[Violation]:
-    cleaned, comments = lex_rust_source(source)
+    cleaned, comments, comment_lines = lex_rust_source(source)
     directives, ignore_violations = parse_ignore_directives(comments, file_path)
-    cleaned_lines = cleaned.splitlines()
+    cleaned_lines = cleaned.split("\n")
     masked_lines = mask_cfg_test_lines(cleaned_lines)
     fn_spans = extract_fn_spans(masked_lines)
     raw_violations = (
         check_fn_spans(fn_spans, masked_lines, file_path)
-        + check_implicit_state_machines(masked_lines, file_path, directives)
+        + check_implicit_state_machines(masked_lines, file_path, directives, comment_lines=comment_lines)
         + check_unwrap_calls(masked_lines, file_path)
         + check_inline_cfg_test(cleaned_lines, fn_spans, file_path)
     )
-    kept = filter_suppressed(raw_violations, fn_spans, directives)
+    kept = filter_suppressed(
+        raw_violations,
+        fn_spans,
+        directives,
+        cleaned_lines=cleaned_lines,
+        comment_lines=comment_lines,
+    )
     return sorted(ignore_violations + kept, key=lambda entry: (entry.line, entry.rule))
 
 
@@ -142,6 +148,8 @@ def check_implicit_state_machines(
     lines: list[str],
     file_path: str,
     directives: dict[int, IgnoreDirective],
+    *,
+    comment_lines: set[int],
 ) -> list[Violation]:
     violations: list[Violation] = []
     scope_stack: list[tuple[int, int, list[str], bool]] = []
@@ -177,11 +185,13 @@ def check_implicit_state_machines(
             pending_flags.clear()
     for start_line, open_line, flags in closed_scopes:
         unique_flags = list(dict.fromkeys(flags))
+        leading = collect_contiguous_header_lines(lines, start_line, prev_end_line=0, comment_lines=comment_lines)
+        header_lines = leading | set(range(start_line, open_line + 1))
         is_ignored = any(
             (directive := directives.get(check_line)) is not None
             and directive.has_reason
             and (directive.is_wildcard or "CANON-03" in directive.rules)
-            for check_line in range(start_line - 1, open_line + 1)
+            for check_line in header_lines
         )
         if len(unique_flags) >= 2 and not is_ignored:
             violations.append(
@@ -294,9 +304,10 @@ def parse_ignore_directives(
     return directives, violations
 
 
-def lex_rust_source(source: str) -> tuple[str, list[tuple[int, str]]]:
+def lex_rust_source(source: str) -> tuple[str, list[tuple[int, str]], set[int]]:
     chars: list[str] = []
     comments: list[tuple[int, str]] = []
+    raw_comment_lines: set[int] = set()
     idx = 0
     line_no = 1
     length = len(source)
@@ -307,10 +318,12 @@ def lex_rust_source(source: str) -> tuple[str, list[tuple[int, str]]]:
             end_idx = source.find("\n", idx)
             end_idx = length if end_idx == -1 else end_idx
             comments.append((line_no, source[idx:end_idx]))
+            raw_comment_lines.add(line_no)
             idx = end_idx
         elif ch == "/" and nxt == "*":
             end_idx = find_nested_block_comment_end(source, idx + 2)
             newlines = source[idx:end_idx].count("\n")
+            raw_comment_lines.update(range(line_no, line_no + newlines + 1))
             chars.append("\n" * newlines)
             line_no += newlines
             idx = end_idx
@@ -335,7 +348,12 @@ def lex_rust_source(source: str) -> tuple[str, list[tuple[int, str]]]:
             line_no += 1 if ch == "\n" else 0
             chars.append(ch)
             idx += 1
-    return "".join(chars), comments
+    cleaned = "".join(chars)
+    cleaned_lines = cleaned.split("\n")
+    comment_lines = {
+        ln for ln in raw_comment_lines if 1 <= ln <= len(cleaned_lines) and not cleaned_lines[ln - 1].strip()
+    }
+    return cleaned, comments, comment_lines
 
 
 def find_nested_block_comment_end(source: str, start_idx: int) -> int:
@@ -463,16 +481,33 @@ def filter_suppressed(
     violations: list[Violation],
     fn_spans: list[FnSpan],
     directives: dict[int, IgnoreDirective],
+    *,
+    cleaned_lines: list[str],
+    comment_lines: set[int],
 ) -> list[Violation]:
+    all_end_lines = [span.end_line for span in fn_spans]
+    span_headers: list[tuple[int, int, set[int]]] = []
+    for span in fn_spans:
+        prev_end = max((end for end in all_end_lines if end < span.start_line), default=0)
+        leading = collect_contiguous_header_lines(
+            cleaned_lines, span.start_line, prev_end_line=prev_end, comment_lines=comment_lines
+        )
+        span_headers.append((span.start_line, span.end_line, leading | {span.start_line}))
+    decl_start_lines = {start_line for start_line, _, _ in span_headers}
     kept: list[Violation] = []
     for entry in violations:
         span_lines = {
             line_num
-            for span in fn_spans
-            if span.start_line <= entry.line <= span.end_line
-            for line_num in (span.start_line, span.start_line - 1)
+            for start_line, end_line, header_set in span_headers
+            if start_line <= entry.line <= end_line
+            for line_num in header_set
         }
-        candidate_lines = {entry.line, entry.line - 1} | span_lines
+        prev_comment = (
+            {entry.line - 1}
+            if (entry.line - 1) in comment_lines and entry.line not in decl_start_lines
+            else set()
+        )
+        candidate_lines = {entry.line} | prev_comment | span_lines
         is_suppressed = any(
             (directive := directives.get(check_line)) is not None
             and directive.has_reason
@@ -482,6 +517,25 @@ def filter_suppressed(
         if not is_suppressed:
             kept.append(entry)
     return kept
+
+
+def collect_contiguous_header_lines(
+    cleaned_lines: list[str],
+    outer_start: int,
+    *,
+    prev_end_line: int,
+    comment_lines: set[int],
+) -> set[int]:
+    collected: set[int] = set()
+    line_no = outer_start - 1
+    while line_no > prev_end_line and line_no >= 1:
+        trimmed = cleaned_lines[line_no - 1].strip()
+        is_outer_attr = trimmed.startswith("#[") and not trimmed.startswith("#![")
+        if line_no not in comment_lines and not is_outer_attr:
+            break
+        collected.add(line_no)
+        line_no -= 1
+    return collected
 
 
 if __name__ == "__main__":

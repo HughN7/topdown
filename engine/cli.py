@@ -29,15 +29,16 @@ class EngineOptions:
     paths: tuple[str, ...]
     as_json: bool
     config_path: Path | None
+    outline: bool = False
 
 
 def main() -> int:
     options = parse_cli_args(sys.argv[1:])
     if options is None:
-        print("Usage: topdown [--json] [--config topdown.toml] <path> [...]", file=sys.stderr)
+        print("Usage: topdown [--json] [--outline] [--config topdown.toml] <path> [...]", file=sys.stderr)
         return 2
     try:
-        from engine.analyzer import Violation, analyze_source
+        from engine.analyzer import Violation, analyze_source, outline_source
         from engine.boundaries import check_file_boundaries, load_boundary_config
     except ImportError as exc:
         print(f"Missing optional engine dependency: {exc}.", file=sys.stderr)
@@ -60,6 +61,8 @@ def main() -> int:
     if file_error is not None:
         print(file_error, file=sys.stderr)
         return 2
+    if options.outline:
+        return run_engine_outline(target_files, outline_source, as_json=options.as_json)
     all_violations: list[Violation] = []
     for file_path in target_files:
         try:
@@ -77,8 +80,59 @@ def main() -> int:
     return 1 if all_violations else 0
 
 
+def run_engine_outline(
+    target_files: list[Path],
+    outline_fn: object,
+    *,
+    as_json: bool,
+) -> int:
+    payload: list[dict[str, object]] = []
+    for file_path in target_files:
+        try:
+            source_text = file_path.read_text(encoding="utf-8")
+            functions = outline_fn(source_text, str(file_path))  # type: ignore[operator]
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"Error reading {file_path}: {exc}", file=sys.stderr)
+            return 2
+        except Exception as exc:
+            print(f"Engine error on {file_path}: {exc}", file=sys.stderr)
+            return 2
+        payload.append({"path": str(file_path), "functions": functions})
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(format_engine_outline_text(payload))
+    return 0
+
+
+def format_engine_outline_text(payload: list[dict[str, object]]) -> str:
+    blocks: list[str] = []
+    for file_entry in payload:
+        lines = [str(file_entry["path"])]
+        functions = file_entry["functions"]
+        if not isinstance(functions, list) or not functions:
+            lines.append("  (no top-level functions)")
+            blocks.append("\n".join(lines))
+            continue
+        for fn_info in functions:
+            declared = fn_info["declared_tier"]
+            valid = fn_info["valid_tiers"]
+            range_badge = f"[{valid[0]}..{valid[-1]}]" if len(valid) > 1 else "[invalid]"
+            inferred_badge = f"[{valid[0]}]" if len(valid) == 1 else range_badge
+            badge = f"[{declared}]" if declared is not None else inferred_badge
+            callers = fn_info["callers"]
+            callees = fn_info["callees"]
+            callers_part = f" <- {', '.join(callers)}" if callers else ""
+            callees_part = f" -> {', '.join(callees)}" if callees else ""
+            span = f"(L{fn_info['start_line']}-L{fn_info['end_line']}, {fn_info['line_count']}L)"
+            lines.append(f"  {badge} {fn_info['name']} {span}{callers_part}{callees_part}")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
+
+
 def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
     as_json = False
+    outline = False
     config_path: Path | None = None
     paths: list[str] = []
     idx = 0
@@ -86,6 +140,8 @@ def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
         token = raw_args[idx]
         if token == "--json":
             as_json = True
+        elif token == "--outline":
+            outline = True
         elif token == "--config" and idx + 1 < len(raw_args):
             config_path = Path(raw_args[idx + 1])
             idx += 1
@@ -98,7 +154,7 @@ def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
         idx += 1
     if not paths:
         return None
-    return EngineOptions(paths=tuple(paths), as_json=as_json, config_path=config_path)
+    return EngineOptions(paths=tuple(paths), as_json=as_json, config_path=config_path, outline=outline)
 
 
 def collect_supported_files(

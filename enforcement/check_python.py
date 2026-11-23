@@ -28,6 +28,7 @@ IGNORE_PATTERN = re.compile(r"#\s*topdown-ignore(?:\((.*)\))?")
 REASON_PATTERN = re.compile(r"""reason\s*=\s*(?:"([^"]+)"|'([^']+)')""")
 RULE_ID_PATTERN = re.compile(r"\b(?:CANON|LLM)-\d{2}\b")
 HEADER_COMMENT_PATTERN = re.compile(r"^#(?:!|\s*-\*-|\s*coding[:=])")
+TIER_TAG_PATTERN = re.compile(r"^\s*#\s*\[L([0-3])\](?:\s|$)")
 LIFECYCLE_BOOL_PATTERN = re.compile(
     r"^(?:(?:is|has|was)_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle)|(?:loading|pending|fetching|submitting|errored|failed|succeeded))$"
 )
@@ -66,17 +67,23 @@ class CliOptions:
     as_json: bool
     apply_fix: bool = False
     dry_run: bool = False
+    outline: bool = False
 
 
 def main() -> int:
     options = parse_cli_args(sys.argv[1:])
     if options is None:
-        print("Usage: python3 check_python.py [--json] [--fix] [--dry-run] <path> [...]", file=sys.stderr)
+        print(
+            "Usage: python3 check_python.py [--json] [--fix] [--dry-run] [--outline] <path> [...]",
+            file=sys.stderr,
+        )
         return 2
     target_files, error_msg = collect_python_files(options.paths)
     if error_msg is not None:
         print(error_msg, file=sys.stderr)
         return 2
+    if options.outline:
+        return run_outline_cli(target_files, as_json=options.as_json)
     all_violations: list[Violation] = []
     for file_path in target_files:
         source_text, read_error = read_source_text(file_path)
@@ -93,6 +100,26 @@ def main() -> int:
     if not options.dry_run:
         emit_violations(all_violations, as_json=options.as_json)
     return 1 if all_violations else 0
+
+
+def run_outline_cli(target_files: list[Path], *, as_json: bool) -> int:
+    payload: list[dict[str, object]] = []
+    for file_path in target_files:
+        source_text, read_error = read_source_text(file_path)
+        if read_error is not None:
+            print(read_error, file=sys.stderr)
+            return 2
+        try:
+            functions = build_file_outline(source_text, str(file_path))
+        except (SyntaxError, ValueError) as exc:
+            print(f"Parse error in {file_path}: {exc}", file=sys.stderr)
+            return 2
+        payload.append({"path": str(file_path), "functions": functions})
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(format_outline_text(payload))
+    return 0
 
 
 def read_source_text(file_path: Path) -> tuple[str, str | None]:
@@ -150,9 +177,88 @@ def fix_source(source: str) -> tuple[str, str | None]:
     return reordered, None
 
 
+def build_file_outline(source: str, file_path: str) -> list[dict[str, object]]:
+    tree = ast.parse(source, filename=file_path)
+    _, _, line_comment_lines = parse_ignore_directives(source, file_path)
+    raw_lines = source.split("\n")
+    top_functions = [
+        node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    all_end_lines = [
+        getattr(node, "end_lineno", None) or getattr(node, "lineno", 0)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    fn_lines = {fn_node.name: fn_node.lineno for fn_node in top_functions}
+    call_graph = {
+        fn_node.name: collect_local_calls(fn_node, fn_lines) - {fn_node.name}
+        for fn_node in top_functions
+    }
+    declared_tags: dict[str, int | None] = {}
+    for fn_node in top_functions:
+        outer_start = fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno
+        prev_end = max((end for end in all_end_lines if end < outer_start), default=0)
+        leading = collect_contiguous_header_lines(
+            raw_lines, outer_start, prev_end_line=prev_end, comment_lines=line_comment_lines
+        )
+        tag_val, _ = extract_function_tier_tags(
+            raw_lines, (leading | set(range(outer_start, fn_node.lineno))) & line_comment_lines
+        )
+        declared_tags[fn_node.name] = tag_val
+    names = [fn_node.name for fn_node in top_functions]
+    dist_map = compute_all_pairs_longest_paths(names, call_graph)
+    bounds_map = compute_tier_bounds(names, dist_map, declared_tags=declared_tags)
+    entries: list[dict[str, object]] = []
+    for fn_node in top_functions:
+        end_line = fn_node.end_lineno or fn_node.lineno
+        tag_val = declared_tags.get(fn_node.name)
+        valid_tiers = bounds_map[fn_node.name][5]
+        callers = sorted(caller for caller in names if fn_node.name in call_graph.get(caller, set()))
+        callees = sorted(call_graph.get(fn_node.name, set()))
+        entries.append(
+            {
+                "name": fn_node.name,
+                "start_line": fn_node.lineno,
+                "end_line": end_line,
+                "line_count": end_line - fn_node.lineno + 1,
+                "declared_tier": f"L{tag_val}" if tag_val is not None else None,
+                "valid_tiers": valid_tiers,
+                "callers": callers,
+                "callees": callees,
+            }
+        )
+    return entries
+
+
+def format_outline_text(payload: list[dict[str, object]]) -> str:
+    blocks: list[str] = []
+    for file_entry in payload:
+        lines = [str(file_entry["path"])]
+        functions = file_entry["functions"]
+        if not isinstance(functions, list) or not functions:
+            lines.append("  (no top-level functions)")
+            blocks.append("\n".join(lines))
+            continue
+        for fn_info in functions:
+            declared = fn_info["declared_tier"]
+            valid = fn_info["valid_tiers"]
+            range_badge = f"[{valid[0]}..{valid[-1]}]" if len(valid) > 1 else "[invalid]"
+            inferred_badge = f"[{valid[0]}]" if len(valid) == 1 else range_badge
+            badge = f"[{declared}]" if declared is not None else inferred_badge
+            callers = fn_info["callers"]
+            callees = fn_info["callees"]
+            callers_part = f" <- {', '.join(callers)}" if callers else ""
+            callees_part = f" -> {', '.join(callees)}" if callees else ""
+            span = f"(L{fn_info['start_line']}-L{fn_info['end_line']}, {fn_info['line_count']}L)"
+            lines.append(f"  {badge} {fn_info['name']} {span}{callers_part}{callees_part}")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
+
+
 def check_source(source: str, file_path: str) -> list[Violation]:
     tree = ast.parse(source, filename=file_path)
-    directives, ignore_violations = parse_ignore_directives(source, file_path)
+    directives, ignore_violations, line_comment_lines = parse_ignore_directives(source, file_path)
+    raw_lines = source.split("\n")
     top_functions = [
         node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
@@ -164,13 +270,30 @@ def check_source(source: str, file_path: str) -> list[Violation]:
         if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
     checked_functions = top_functions + class_methods
+    all_decls = checked_functions + all_classes
+    all_end_lines = [node.end_lineno or node.lineno for node in all_decls]
     raw_violations: list[Violation] = []
     raw_violations.extend(check_order_and_depth(top_functions, file_path))
+    raw_violations.extend(
+        check_tier_tags(
+            top_functions,
+            raw_lines,
+            file_path,
+            line_comment_lines=line_comment_lines,
+            all_end_lines=all_end_lines,
+        )
+    )
     raw_violations.extend(check_class_state_machines(all_classes, file_path))
     is_test_file = bool(TEST_PATH_PATTERN.search(file_path))
     for fn_node in checked_functions:
         raw_violations.extend(check_function_rules(fn_node, file_path, is_test_file=is_test_file))
-    filtered = filter_suppressed(raw_violations, checked_functions + all_classes, directives)
+    filtered = filter_suppressed(
+        raw_violations,
+        all_decls,
+        directives,
+        raw_lines=raw_lines,
+        comment_lines=line_comment_lines,
+    )
     return sorted(ignore_violations + filtered, key=lambda entry: (entry.line, entry.rule))
 
 
@@ -214,6 +337,78 @@ def check_order_and_depth(
                         f"'{fn_node.name}' reaches call depth {depth} (max L0->L1->L2 + L3 leaf) "
                         "-> flatten pass-through calls or inline trivial helpers."
                     ),
+                )
+            )
+    return violations
+
+
+def check_tier_tags(
+    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    raw_lines: list[str],
+    file_path: str,
+    *,
+    line_comment_lines: set[int],
+    all_end_lines: list[int],
+) -> list[Violation]:
+    violations: list[Violation] = []
+    fn_lines = {fn_node.name: fn_node.lineno for fn_node in top_functions}
+    call_graph = {
+        fn_node.name: collect_local_calls(fn_node, fn_lines) - {fn_node.name}
+        for fn_node in top_functions
+    }
+    declared_tags: dict[str, int | None] = {}
+    for fn_node in top_functions:
+        outer_start = fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno
+        prev_end = max((end for end in all_end_lines if end < outer_start), default=0)
+        leading = collect_contiguous_header_lines(
+            raw_lines, outer_start, prev_end_line=prev_end, comment_lines=line_comment_lines
+        )
+        tag_val, has_multiple = extract_function_tier_tags(
+            raw_lines, (leading | set(range(outer_start, fn_node.lineno))) & line_comment_lines
+        )
+        declared_tags[fn_node.name] = tag_val
+        if has_multiple:
+            violations.append(
+                Violation(file_path, fn_node.lineno, "CANON-01", f"'{fn_node.name}' has multiple tier tags -> keep a single [L0]..[L3] tag.")
+            )
+    names = [fn_node.name for fn_node in top_functions]
+    dist_map = compute_all_pairs_longest_paths(names, call_graph)
+    bounds_map = compute_tier_bounds(names, dist_map, declared_tags=declared_tags)
+    for fn_node in top_functions:
+        tag_val = declared_tags.get(fn_node.name)
+        if tag_val is None:
+            continue
+        d_max, height, lb_0, ub_0, is_adapter, _ = bounds_map[fn_node.name]
+        valid_0 = [f"[L{tier}]" for tier in range(4) if lb_0 <= tier <= ub_0]
+        if tag_val == 3 and height > 0:
+            violations.append(
+                Violation(file_path, fn_node.lineno, "CANON-01", f"'{fn_node.name}' is tagged [L3] (leaf) but calls local functions -> update tag or move local calls to L1/L2.")
+            )
+        elif tag_val < lb_0 or tag_val > ub_0:
+            msg = (
+                f"'{fn_node.name}' is tagged [L{tag_val}] outside valid tier range ({', '.join(valid_0)}) for depth {d_max} and height {height} -> update tier tag."
+                if valid_0
+                else f"'{fn_node.name}' is tagged [L{tag_val}] in a call chain exceeding L0->L3 ceiling (depth {d_max}, height {height}) -> flatten call depth."
+            )
+            violations.append(Violation(file_path, fn_node.lineno, "CANON-01", msg))
+        bad_ancestors = [
+            (anc, dist_map[(anc, fn_node.name)])
+            for anc in names
+            if anc != fn_node.name
+            and declared_tags.get(anc) is not None
+            and (anc, fn_node.name) in dist_map
+            and not (dist_map[(anc, fn_node.name)] == 1 and declared_tags[anc] == 0 and tag_val == 0 and is_adapter)
+            and tag_val - declared_tags[anc] < dist_map[(anc, fn_node.name)]
+        ]
+        if bad_ancestors:
+            anc_name, anc_dist = bad_ancestors[0]
+            anc_tag = declared_tags[anc_name] or 0
+            violations.append(
+                Violation(
+                    file_path,
+                    fn_node.lineno,
+                    "CANON-01",
+                    f"'{fn_node.name}' is tagged [L{tag_val}] at call distance {anc_dist} below '{anc_name}' ([L{anc_tag}]) -> callee tier must be at least [L{anc_tag + anc_dist}].",
                 )
             )
     return violations
@@ -310,6 +505,7 @@ def parse_cli_args(raw_args: list[str]) -> CliOptions | None:
     as_json = False
     apply_fix = False
     dry_run = False
+    outline = False
     paths: list[str] = []
     for token in raw_args:
         if token == "--json":
@@ -321,12 +517,15 @@ def parse_cli_args(raw_args: list[str]) -> CliOptions | None:
         if token == "--dry-run":
             dry_run = True
             continue
+        if token == "--outline":
+            outline = True
+            continue
         if token.startswith("-"):
             return None
         paths.append(token)
-    if not paths:
+    if not paths or (outline and (apply_fix or dry_run)):
         return None
-    return CliOptions(paths=tuple(paths), as_json=as_json, apply_fix=apply_fix, dry_run=dry_run)
+    return CliOptions(paths=tuple(paths), as_json=as_json, apply_fix=apply_fix, dry_run=dry_run, outline=outline)
 
 
 def collect_python_files(raw_paths: tuple[str, ...]) -> tuple[list[Path], str | None]:
@@ -354,17 +553,24 @@ def emit_violations(violations: list[Violation], *, as_json: bool) -> None:
         print(f"{entry.path}:{entry.line}: [{entry.rule}] {entry.message}")
 
 
-def parse_ignore_directives(source: str, file_path: str) -> tuple[dict[int, IgnoreDirective], list[Violation]]:
+def parse_ignore_directives(
+    source: str,
+    file_path: str,
+) -> tuple[dict[int, IgnoreDirective], list[Violation], set[int]]:
     directives: dict[int, IgnoreDirective] = {}
     violations: list[Violation] = []
+    line_comment_lines: set[int] = set()
+    raw_lines = source.split("\n")
     reader = io.StringIO(source).readline
     for tok in tokenize.generate_tokens(reader):
         if tok.type != tokenize.COMMENT:
             continue
+        line_no = tok.start[0]
+        if 1 <= line_no <= len(raw_lines) and raw_lines[line_no - 1].lstrip().startswith("#"):
+            line_comment_lines.add(line_no)
         match = IGNORE_PATTERN.search(tok.string)
         if not match:
             continue
-        line_no = tok.start[0]
         inner = match.group(1) or ""
         rules = frozenset(RULE_ID_PATTERN.findall(inner))
         has_reason = REASON_PATTERN.search(inner) is not None
@@ -377,31 +583,43 @@ def parse_ignore_directives(source: str, file_path: str) -> tuple[dict[int, Igno
             violations.append(
                 Violation(file_path, line_no, "CANON-08", 'topdown-ignore requires a non-empty reason="...".')
             )
-    return directives, violations
+    return directives, violations, line_comment_lines
 
 
 def filter_suppressed(
     violations: list[Violation],
     checked_functions: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef],
     directives: dict[int, IgnoreDirective],
+    *,
+    raw_lines: list[str],
+    comment_lines: set[int],
 ) -> list[Violation]:
-    fn_spans = [
-        (
-            fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno,
-            fn_node.lineno,
-            fn_node.lineno if isinstance(fn_node, ast.ClassDef) else (fn_node.end_lineno or fn_node.lineno),
+    all_end_lines = [node.end_lineno or node.lineno for node in checked_functions]
+    fn_spans: list[tuple[int, int, set[int]]] = []
+    for fn_node in checked_functions:
+        dec_line = fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno
+        def_line = fn_node.lineno
+        end_line = fn_node.lineno if isinstance(fn_node, ast.ClassDef) else (fn_node.end_lineno or fn_node.lineno)
+        prev_end = max((end for end in all_end_lines if end < dec_line), default=0)
+        leading = collect_contiguous_header_lines(
+            raw_lines, dec_line, prev_end_line=prev_end, comment_lines=comment_lines
         )
-        for fn_node in checked_functions
-    ]
+        fn_spans.append((dec_line, end_line, leading | set(range(dec_line, def_line + 1))))
+    decl_start_lines = {dec_line for dec_line, _, _ in fn_spans} | {fn_node.lineno for fn_node in checked_functions}
     kept: list[Violation] = []
     for entry in violations:
         span_lines = {
             line_num
-            for dec_line, def_line, end_line in fn_spans
+            for dec_line, end_line, header_set in fn_spans
             if dec_line <= entry.line <= end_line
-            for line_num in range(dec_line - 1, def_line + 1)
+            for line_num in header_set
         }
-        candidate_lines = {entry.line, entry.line - 1} | span_lines
+        prev_comment = (
+            {entry.line - 1}
+            if (entry.line - 1) in comment_lines and entry.line not in decl_start_lines
+            else set()
+        )
+        candidate_lines = {entry.line} | prev_comment | span_lines
         is_suppressed = any(
             (directive := directives.get(check_line)) is not None
             and directive.has_reason
@@ -678,6 +896,111 @@ def rebuild_reordered_source(
         sep = "\n" if suffix.startswith(("\n", "\r\n")) else "\n\n"
         return prefix + "\n\n".join(blocks) + sep + suffix
     return prefix + "\n\n".join(blocks) + trailing_newline
+
+
+def collect_contiguous_header_lines(
+    raw_lines: list[str],
+    outer_start: int,
+    *,
+    prev_end_line: int,
+    comment_lines: set[int],
+) -> set[int]:
+    collected: set[int] = set()
+    line_no = outer_start - 1
+    while line_no > prev_end_line and line_no >= 1:
+        trimmed = raw_lines[line_no - 1].lstrip()
+        if line_no not in comment_lines or HEADER_COMMENT_PATTERN.match(trimmed):
+            break
+        collected.add(line_no)
+        line_no -= 1
+    return collected
+
+
+def extract_function_tier_tags(
+    raw_lines: list[str],
+    candidate_comment_lines: set[int],
+) -> tuple[int | None, bool]:
+    matched_tiers = [
+        int(match.group(1))
+        for line_no in sorted(candidate_comment_lines)
+        if 1 <= line_no <= len(raw_lines)
+        and (match := TIER_TAG_PATTERN.match(raw_lines[line_no - 1])) is not None
+    ]
+    if len(matched_tiers) > 1:
+        return None, True
+    return (matched_tiers[0], False) if matched_tiers else (None, False)
+
+
+def compute_all_pairs_longest_paths(
+    names: list[str],
+    call_graph: dict[str, set[str]],
+) -> dict[tuple[str, str], int]:
+    dist: dict[tuple[str, str], int] = {}
+    stack: list[tuple[str, str, int, frozenset[str]]] = [
+        (src, dst, 1, frozenset({src, dst}))
+        for src in names
+        for dst in call_graph.get(src, set())
+        if dst != src
+    ]
+    while stack:
+        src, current, length, visited = stack.pop()
+        if length > dist.get((src, current), 0):
+            dist[(src, current)] = length
+        stack.extend(
+            (src, nxt, length + 1, visited | {nxt})
+            for nxt in call_graph.get(current, set())
+            if nxt not in visited and length + 1 > dist.get((src, nxt), 0)
+        )
+    return dist
+
+
+def compute_tier_bounds(
+    names: list[str],
+    dist: dict[tuple[str, str], int],
+    *,
+    declared_tags: dict[str, int | None],
+) -> dict[str, tuple[int, int, int, int, bool, list[str]]]:
+    d_max_map = {
+        name: max((length for (src, dst), length in dist.items() if dst == name), default=0)
+        for name in names
+    }
+    height_map = {
+        name: max((length for (src, dst), length in dist.items() if src == name), default=0)
+        for name in names
+    }
+    l0_adapters = {
+        name
+        for name in names
+        if height_map[name] == 0
+        and d_max_map[name] == 1
+        and all(
+            d_max_map[caller] == 0 and declared_tags.get(caller) in {0, None}
+            for (caller, dst), length in dist.items()
+            if dst == name and length == 1
+        )
+    }
+    bounds: dict[str, tuple[int, int, int, int, bool, list[str]]] = {}
+    for name in names:
+        is_adapter = name in l0_adapters
+        lb_0 = 0 if is_adapter else d_max_map[name]
+        ub_0 = 3 - height_map[name]
+        anc_lbs = [
+            (declared_tags[anc] or 0) + length
+            for (anc, dst), length in dist.items()
+            if dst == name
+            and declared_tags.get(anc) is not None
+            and not (length == 1 and declared_tags[anc] == 0 and is_adapter)
+        ]
+        desc_ubs = [
+            0 if (length == 1 and declared_tags[desc] == 0 and desc in l0_adapters) else ((declared_tags[desc] or 0) - length)
+            for (src, desc), length in dist.items()
+            if src == name and declared_tags.get(desc) is not None
+        ]
+        lb = max([lb_0, *anc_lbs])
+        ub = min([ub_0, *desc_ubs])
+        valid_tiers = [f"L{tier}" for tier in range(4) if lb <= tier <= ub]
+        bounds[name] = (d_max_map[name], height_map[name], lb_0, ub_0, is_adapter, valid_tiers)
+    return bounds
 
 
 if __name__ == "__main__":
