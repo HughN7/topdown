@@ -117,6 +117,22 @@ class TestInitCmd(unittest.TestCase):
         self.assertEqual(missing_dir.returncode, 2)
         self.assertIn("Directory not found", missing_dir.stderr)
 
+    def test_init_and_load_boundary_config_work_without_tree_sitter(self) -> None:
+        from unittest import mock
+
+        from engine import cli
+        from engine.boundaries import load_boundary_config
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "app.py").write_text("def ok() -> int:\n    return 1\n", encoding="utf-8")
+            with mock.patch.dict(sys.modules, {"tree_sitter_language_pack": None}):
+                with mock.patch.object(sys, "argv", ["topdown", "init", str(root)]):
+                    self.assertEqual(cli.main(), 0)
+                boundary_cfg, cfg_error = load_boundary_config(root, None)
+                self.assertIsNone(cfg_error)
+                self.assertIsNone(boundary_cfg)
+
 
 if __name__ == "__main__":
     unittest.main()

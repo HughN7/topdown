@@ -11,10 +11,9 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from tree_sitter_language_pack import get_parser
-
-from engine.analyzer import Violation, extract_ignore_directives
+from engine.models import Violation
 from engine.specs import LanguageSpec, spec_for_path
+from engine.suppress import extract_ignore_directives
 
 QUOTED_IMPORT_PATTERN = re.compile(r"""["']([^"']+)["']""")
 PY_FROM_PATTERN = re.compile(r"\bfrom\s+([A-Za-z0-9_.]+)\s+import\b")
@@ -63,6 +62,8 @@ def check_file_boundaries(source: str, file_path: Path, config: BoundaryConfig) 
     spec = spec_for_path(file_path)
     if spec is None or not config.pure_dirs or not is_inside_dirs(file_path, config.root_dir, config.pure_dirs):
         return []
+    from tree_sitter_language_pack import get_parser
+
     parser = get_parser(spec.name)
     source_bytes = source.encode("utf-8")
     tree = parser.parse(source_bytes)
