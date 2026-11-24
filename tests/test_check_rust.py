@@ -566,6 +566,23 @@ class TestCheckRust(unittest.TestCase):
             "    is_loading\n"
             "}\n"
         )
+        nested_if_let_struct_depth2 = (
+            "pub fn sequential_depth2(a: bool, b: bool, c: bool, x: Foo) -> i64 {\n"
+            "    if a {\n"
+            "        if let Foo {\n"
+            "            bar\n"
+            "        } = x {\n"
+            "            return 1;\n"
+            "        }\n"
+            "    }\n"
+            "    if b {\n"
+            "        if c {\n"
+            "            return 2;\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
         self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(multiline_if_deep, "mif05.rs")])
         self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(multiline_if_state, "mif03.rs")])
         self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(multiline_if_let_struct_deep, "mlet05.rs")])
@@ -574,6 +591,7 @@ class TestCheckRust(unittest.TestCase):
         self.assertEqual(check_rust.check_source(non_rust_keywords, "nonrust.rs"), [])
         self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(other_multiline_controls, "other_ctrl.rs")])
         self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(else_if_and_loop_state, "else_loop.rs")])
+        self.assertEqual(check_rust.check_source(nested_if_let_struct_depth2, "seq_depth2.rs"), [])
 
     def test_multiline_rust_attribute_header_walk(self) -> None:
         import check_rust
@@ -622,6 +640,38 @@ class TestCheckRust(unittest.TestCase):
             "    0\n"
             "}\n"
         )
+        line1_inline_attr = (
+            '#[inline] // topdown-ignore(CANON-05, reason="inline attr at line 1")\n'
+            "pub fn second(a: bool, b: bool, c: bool) -> i64 {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            if c {\n"
+            "                return 1;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        post_prev_end_attr = (
+            "pub fn first() -> i64 {\n"
+            "    1\n"
+            "}\n"
+            "#[cfg_attr(\n"
+            "    all(),\n"
+            '    inline // topdown-ignore(CANON-05, reason="post prev_end attr")\n'
+            ")]\n"
+            "pub fn second(a: bool, b: bool, c: bool) -> i64 {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            if c {\n"
+            "                return 1;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
         self.assertEqual(check_rust.check_source(suppressed_fn, "attr_fn.rs"), [])
         self.assertEqual(check_rust.check_source(suppressed_struct, "attr_struct.rs"), [])
         self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(inner_attr_blocks, "inner_attr.rs")])
@@ -630,6 +680,14 @@ class TestCheckRust(unittest.TestCase):
             lines, 6, prev_end_line=0, comment_lines={1}
         )
         self.assertEqual(collected, {1, 2, 3, 4, 5})
+        self.assertEqual(check_rust.check_source(line1_inline_attr, "line1_attr.rs"), [])
+        self.assertEqual(check_rust.check_source(post_prev_end_attr, "post_prev_attr.rs"), [])
+        self.assertEqual(
+            check_rust.collect_contiguous_header_lines(
+                post_prev_end_attr.splitlines(), 8, prev_end_line=3, comment_lines=set()
+            ),
+            {4, 5, 6, 7},
+        )
 
 
 if __name__ == "__main__":

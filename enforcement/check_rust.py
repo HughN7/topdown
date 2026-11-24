@@ -635,11 +635,14 @@ def measure_control_nesting(
         if tok == "}":
             continue
         is_ctrl_open = tok == "{" and is_top_depth and not top[4] and not top[5]
+        if tok.endswith("{") and top is not None and not is_ctrl_open:
+            condition_brace_depth += 1
+            in_impl_header = False
+            continue
         if is_ctrl_open and not top[3]:
             control_stack.append(brace_depth)
             max_nesting = max(max_nesting, len(control_stack))
         if tok.endswith("{"):
-            condition_brace_depth += 1 if (top is not None and not is_ctrl_open) else 0
             let_depth = None if (is_ctrl_open and top[3]) else let_depth
             pending_controls = pending_controls[:-1] if is_ctrl_open else pending_controls
             brace_depth += 1
@@ -722,7 +725,7 @@ def collect_contiguous_header_lines(
     pending_delims: list[str] = []
     cur_code = ""
     line_no = outer_start - 1
-    while (line_no > prev_end_line and line_no >= 1) or pending_delims:
+    while (line_no > prev_end_line and line_no >= 1) or pending_delims or (attr_lines and not attr_stack):
         if pending_delims and pending_delims[-1] in "])}":
             attr_stack.append(pending_delims.pop())
             continue
