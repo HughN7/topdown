@@ -689,6 +689,23 @@ class TestCheckRust(unittest.TestCase):
             {4, 5, 6, 7},
         )
 
+    def test_module_size_ceiling_and_packed_statements(self) -> None:
+        import check_rust
+
+        monolith = "\n".join(
+            f"pub fn fn_{idx}(value: i32) -> i32 {{\n"
+            + "".join(f"    let step_{step} = value + {step};\n" for step in range(28))
+            + "    value\n}\n"
+            for idx in range(16)
+        )
+        self.assertEqual(len([v for v in check_rust.check_source(monolith, "src/big.rs") if v.rule == "CANON-01" and v.line == 1]), 1)
+        self.assertEqual(len([v for v in check_rust.check_source(monolith, "tests/big.rs") if v.rule == "CANON-01" and v.line == 1]), 0)
+        waived = '// topdown-ignore(CANON-01, reason="standalone CLI")\n' + monolith
+        self.assertEqual(len([v for v in check_rust.check_source(waived, "src/big.rs") if v.rule == "CANON-01" and v.line == 1]), 0)
+
+        packed = "pub fn cramped(value: i32) -> i32 {\n    let first = value + 1; let second = first + 2;\n    second\n}\n"
+        self.assertEqual(len([v for v in check_rust.check_source(packed, "src/packed.rs") if v.rule == "LLM-05"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

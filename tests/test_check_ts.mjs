@@ -1321,3 +1321,31 @@ test("CANON-03 flags deeply nested inline generics and wide anonymous tuples in 
   const goodViolations = mod.checkSourceWithAst(goodCode, "clean_types.ts", tsMod).filter((v) => v.rule === "CANON-03");
   assert.deepEqual(goodViolations, []);
 });
+
+test("CANON-01 module size ceiling, preamble waiver, and LLM-05 horizontal packing", async () => {
+  const mod = await import("../enforcement/check_ts.mjs");
+  const tsMod = await mod.loadTypeScript();
+  const monolith = Array.from({ length: 16 }, (_, idx) => {
+    const body = Array.from({ length: 28 }, (_, step) => `  const step_${step} = value + ${step};`).join("\n");
+    return `export function fn_${idx}(value: number): number {\n${body}\n  return value;\n}`;
+  }).join("\n");
+  assert.equal(mod.checkSource(monolith, "src/big.ts").filter((v) => v.rule === "CANON-01" && v.line === 1).length, 1);
+  assert.equal(mod.checkSource(monolith, "tests/big.test.ts").filter((v) => v.rule === "CANON-01" && v.line === 1).length, 0);
+  const waived = `// topdown-ignore(CANON-01, reason="standalone CLI")\n${monolith}`;
+  assert.equal(mod.checkSource(waived, "src/big.ts").filter((v) => v.rule === "CANON-01" && v.line === 1).length, 0);
+
+  const packed = [
+    "export function cramped(flagA: boolean, flagB: boolean): number {",
+    "  let total = 0; total += 1;",
+    "  for (let idx = 0; idx < 3; idx += 1) {",
+    "    total += idx;",
+    "  }",
+    "  const pair = [flagA ? 1 : 2, flagB ? 3 : 4];",
+    "  return total + pair[0];",
+    "}",
+  ].join("\n");
+  assert.equal(mod.checkSource(packed, "src/packed.ts").filter((v) => v.rule === "LLM-05").length, 1);
+  if (tsMod) {
+    assert.equal(mod.checkSourceWithAst(packed, "src/packed.ts", tsMod).filter((v) => v.rule === "LLM-05").length, 2);
+  }
+});

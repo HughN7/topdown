@@ -1,3 +1,4 @@
+# topdown-ignore(CANON-01, reason="standalone zero-dependency Rust CLI checker")
 """Lightweight zero-dependency heuristic Rust structural checker for topdown.
 
 Intended as a complement to Clippy (see languages/rust.md), not a full Rust parser.
@@ -14,6 +15,13 @@ from typing import NamedTuple
 
 MAX_FUNCTION_LINES = 80
 MAX_NESTING_DEPTH = 2
+MAX_MODULE_CODE_LINES = 450
+MAX_MODULE_FUNCTIONS = 15
+TEST_PATH_PATTERN = re.compile(
+    r"(?:^|[/\\])(?:tests?|__tests__|specs?)(?:[/\\]|$)|(?:^|[/\\])test_[^/\\]+\.|\.(?:test|spec)\.[^/\\]+$|_test\.[^/\\]+$",
+    re.IGNORECASE,
+)
+MULTI_STMT_PATTERN = re.compile(r";\s*[^}\s;)]")
 IGNORE_PATTERN = re.compile(r"//\s*topdown-ignore(?:\((.*)\))?")
 REASON_PATTERN = re.compile(r"""reason\s*=\s*(?:"([^"]+)"|'([^']+)')""")
 RULE_ID_PATTERN = re.compile(r"\b(?:CANON|LLM)-\d{2}\b")
@@ -137,6 +145,7 @@ def check_source(source: str, file_path: str) -> list[Violation]:
         + check_implicit_state_machines(masked_lines, file_path, directives, comment_lines=comment_lines)
         + check_unwrap_calls(masked_lines, file_path)
         + check_inline_cfg_test(cleaned_lines, fn_spans, file_path)
+        + check_module_size_and_packing(masked_lines, file_path, fn_count=len(fn_spans), comment_lines=comment_lines, directives=directives)
     )
     kept = filter_suppressed(
         raw_violations,
@@ -249,6 +258,47 @@ def check_unwrap_calls(lines: list[str], file_path: str) -> list[Violation]:
         for idx, line_text in enumerate(lines)
         if UNWRAP_PATTERN.search(line_text)
     ]
+
+
+def check_module_size_and_packing(
+    cleaned_lines: list[str],
+    file_path: str,
+    *,
+    fn_count: int,
+    comment_lines: set[int],
+    directives: dict[int, IgnoreDirective],
+) -> list[Violation]:
+    violations: list[Violation] = []
+    if not TEST_PATH_PATTERN.search(file_path):
+        code_lines = sum(1 for idx, line in enumerate(cleaned_lines, start=1) if line.strip() and idx not in comment_lines)
+        first_code_line = next(
+            (idx for idx, line in enumerate(cleaned_lines, start=1) if line.strip() and idx not in comment_lines),
+            len(cleaned_lines) + 1,
+        )
+        has_waiver = any(
+            line_no < first_code_line and directive.has_reason and (directive.is_wildcard or "CANON-01" in directive.rules)
+            for line_no, directive in directives.items()
+        )
+        if code_lines > MAX_MODULE_CODE_LINES and fn_count > MAX_MODULE_FUNCTIONS and not has_waiver:
+            violations.append(
+                Violation(
+                    file_path,
+                    1,
+                    "CANON-01",
+                    f"Module has {code_lines} code lines and {fn_count} functions (max {MAX_MODULE_CODE_LINES} lines / {MAX_MODULE_FUNCTIONS} functions) -> split by domain responsibility into cohesive modules.",
+                )
+            )
+    for idx, line in enumerate(cleaned_lines, start=1):
+        if MULTI_STMT_PATTERN.search(line):
+            violations.append(
+                Violation(
+                    file_path,
+                    idx,
+                    "LLM-05",
+                    "Multiple statements packed onto one line -> format with one statement per line.",
+                )
+            )
+    return violations
 
 
 def check_inline_cfg_test(
@@ -612,10 +662,11 @@ def measure_control_nesting(
     body_start_col: int = 0,
     end_col: int | None = None,
 ) -> int:
-    body_text = "\n".join(
-        lines[ln - 1][(body_start_col if ln == body_start_line else 0) : (end_col if ln == end_line else None)]
-        for ln in range(body_start_line, end_line + 1)
-    )
+    body_slices = list(lines[body_start_line - 1 : end_line])
+    if body_slices:
+        body_slices[-1] = body_slices[-1][:end_col] if end_col is not None else body_slices[-1]
+        body_slices[0] = body_slices[0][body_start_col:]
+    body_text = "\n".join(body_slices)
     control_stack: list[int] = []
     pending_controls: list[list[int | bool]] = []
     brace_depth = paren_depth = bracket_depth = condition_brace_depth = max_nesting = 0

@@ -1,3 +1,4 @@
+# topdown-ignore(CANON-01, reason="standalone zero-dependency Python CLI checker")
 """Reference zero-dependency Python AST checker for the topdown architecture framework."""
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ MAX_POSITIONAL_ARGS = 3
 MAX_TOTAL_ARGS = 6
 MAX_NESTING_DEPTH = 2
 MAX_BUSINESS_DEPTH = 2
+MAX_MODULE_CODE_LINES = 450
+MAX_MODULE_FUNCTIONS = 15
 VAGUE_NOUNS = frozenset({"data", "info", "item", "temp", "result", "handler"})
 GAMING_NAME_PATTERN = re.compile(r"(?:_part\d+|_helper\d*)$", re.IGNORECASE)
 TEST_ENV_MARKERS = frozenset({"PYTEST_CURRENT_TEST", "UNITTEST_RUNNING"})
@@ -448,6 +451,9 @@ def check_source(source: str, file_path: str) -> list[Violation]:
     raw_violations.extend(check_class_state_machines(all_classes, file_path))
     raw_violations.extend(check_type_complexity(checked_functions, file_path))
     is_test_file = bool(TEST_PATH_PATTERN.search(file_path))
+    if not is_test_file:
+        raw_violations.extend(check_module_size(raw_lines, file_path, fn_count=len(checked_functions), comment_lines=line_comment_lines, directives=directives))
+    raw_violations.extend(check_horizontal_compression(tree, file_path))
     for fn_node in checked_functions:
         raw_violations.extend(check_function_rules(fn_node, file_path, is_test_file=is_test_file))
     filtered = filter_suppressed(
@@ -681,6 +687,64 @@ def check_type_complexity(functions: list[FuncNode], file_path: str) -> list[Vio
                     f"Inline generic type nesting depth {complexity.max_depth} (max 2) -> extract a named type alias or domain type.",
                 )
             )
+    return violations
+
+
+def check_module_size(
+    raw_lines: list[str],
+    file_path: str,
+    *,
+    fn_count: int,
+    comment_lines: set[int],
+    directives: dict[int, IgnoreDirective],
+) -> list[Violation]:
+    code_lines = sum(1 for idx, line in enumerate(raw_lines, start=1) if line.strip() and idx not in comment_lines)
+    if code_lines <= MAX_MODULE_CODE_LINES or fn_count <= MAX_MODULE_FUNCTIONS:
+        return []
+    first_code_line = next(
+        (idx for idx, line in enumerate(raw_lines, start=1) if line.strip() and idx not in comment_lines),
+        len(raw_lines) + 1,
+    )
+    has_waiver = any(
+        line_no < first_code_line and directive.has_reason and (directive.is_wildcard or "CANON-01" in directive.rules)
+        for line_no, directive in directives.items()
+    )
+    if has_waiver:
+        return []
+    return [
+        Violation(
+            file_path,
+            1,
+            "CANON-01",
+            f"Module has {code_lines} code lines and {fn_count} functions (max {MAX_MODULE_CODE_LINES} lines / {MAX_MODULE_FUNCTIONS} functions) -> split by domain responsibility into cohesive modules.",
+        )
+    ]
+
+
+def check_horizontal_compression(tree: ast.Module, file_path: str) -> list[Violation]:
+    stmt_lists = [
+        field_val
+        for node in ast.walk(tree)
+        for _, field_val in ast.iter_fields(node)
+        if isinstance(field_val, list) and len(field_val) >= 2 and isinstance(field_val[0], ast.stmt)
+    ]
+    packed_lines: set[int] = set()
+    for stmt_list in stmt_lists:
+        line_nums = [stmt.lineno for stmt in stmt_list if isinstance(stmt, ast.stmt)]
+        packed_lines.update(line_no for idx, line_no in enumerate(line_nums) if line_no in line_nums[:idx])
+    ifexp_counts: dict[int, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.IfExp) and not any(isinstance(ch, ast.IfExp) for ch in ast.iter_child_nodes(node)):
+            ifexp_counts[node.lineno] = ifexp_counts.get(node.lineno, 0) + 1
+    violations = [
+        Violation(file_path, line_no, "LLM-05", "Multiple statements packed onto one line -> format with one statement per line.")
+        for line_no in sorted(packed_lines)
+    ]
+    violations.extend(
+        Violation(file_path, line_no, "LLM-05", f"{count} inline conditionals packed onto one line -> split into readable statements.")
+        for line_no, count in sorted(ifexp_counts.items())
+        if count >= 2 and line_no not in packed_lines
+    )
     return violations
 
 
@@ -1382,7 +1446,9 @@ def normalize_python_leaf_skeleton(
             env = {var_name: val for var_name, val in env.items() if var_name not in saved} | {var_name: val for var_name, val in saved.items() if val is not None}
         elif tag == "ARGS":
             prefix, is_async_fn, args_obj, body_nodes = payload
-            param_names = [param.arg for param in list(args_obj.posonlyargs) + list(args_obj.args) + ([args_obj.vararg] if args_obj.vararg else []) + list(args_obj.kwonlyargs) + ([args_obj.kwarg] if args_obj.kwarg else [])]
+            varargs = [args_obj.vararg] if args_obj.vararg else []
+            kwargs = [args_obj.kwarg] if args_obj.kwarg else []
+            param_names = [param.arg for param in list(args_obj.posonlyargs) + list(args_obj.args) + varargs + list(args_obj.kwonlyargs) + kwargs]
             defaults = [None] * (len(args_obj.posonlyargs) + len(args_obj.args) - len(args_obj.defaults)) + list(args_obj.defaults) + list(args_obj.kw_defaults)
             tokens.append((prefix, is_async_fn, len(args_obj.posonlyargs), len(args_obj.args), len(args_obj.kwonlyargs), args_obj.vararg is not None, args_obj.kwarg is not None))
             scope_stack.append({})

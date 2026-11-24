@@ -1378,6 +1378,22 @@ class TestUniversalEngine(unittest.TestCase):
             canon03 = [v for v in analyze_source(code, filename) if v.rule == "CANON-03"]
             self.assertEqual(len(canon03), expected_count, msg=f"{filename}: {canon03}")
 
+    def test_engine_module_size_ceiling_and_packed_statements(self) -> None:
+        from engine.analyzer import analyze_source
+
+        monolith = "\n".join(
+            f"def fn_{idx}(value: int) -> int:\n" + "".join(f"    step_{step} = value + {step}\n" for step in range(28)) + "    return value\n"
+            for idx in range(16)
+        )
+        self.assertEqual(len([v for v in analyze_source(monolith, "src/big.py") if v.rule == "CANON-01" and v.line == 1]), 1)
+        self.assertEqual(len([v for v in analyze_source(monolith, "tests/test_big.py") if v.rule == "CANON-01" and v.line == 1]), 0)
+        waived = '# topdown-ignore(CANON-01, reason="standalone CLI")\n' + monolith
+        self.assertEqual(len([v for v in analyze_source(waived, "src/big.py") if v.rule == "CANON-01" and v.line == 1]), 0)
+
+        packed = "def cramped(value: int) -> int:\n    first = value + 1; second = first + 2\n    return second\n"
+        llm05 = [v for v in analyze_source(packed, "src/packed.py") if v.rule == "LLM-05"]
+        self.assertEqual(len(llm05), 1, msg=str(llm05))
+
 
 if __name__ == "__main__":
     unittest.main()

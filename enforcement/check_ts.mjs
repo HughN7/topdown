@@ -1,3 +1,4 @@
+// topdown-ignore(CANON-01, reason="standalone zero-dependency TS/JS CLI checker")
 /**
  * Lightweight zero-dependency heuristic TS/JS structural checker for topdown.
  * Intended as a complement to ESLint (see languages/typescript.md), not a full AST parser.
@@ -12,6 +13,9 @@ const MAX_FUNCTION_LINES = 80;
 const MAX_NESTING_DEPTH = 2;
 const MAX_POSITIONAL_ARGS = 3;
 const MAX_BUSINESS_DEPTH = 2;
+const MAX_MODULE_CODE_LINES = 450;
+const MAX_MODULE_FUNCTIONS = 15;
+const TS_MULTI_STMT_PATTERN = /;\s*[^}\s;)]/;
 const VAGUE_NOUNS = new Set(["data", "info", "item", "temp", "result", "handler"]);
 const GAMING_NAME_PATTERN = /(?:_part\d+|_helper\d*|Part\d+|Helper\d*)$/;
 const TS_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
@@ -209,6 +213,8 @@ export function checkSourceWithAst(source, filePath, tsMod) {
     }),
     ...checkAstFunctionRules(allFunctions, { sf, tsMod, filePath }),
     ...checkAstTypeComplexity(allFunctions, filePath, { sf, tsMod }),
+    ...checkModuleSizeAndPacking(cleanedLines, filePath, { fnCount: allFunctions.length, commentLines, directives, skipRegexPacking: true }),
+    ...checkAstPackingAndTernaries(sf, filePath, tsMod),
     ...checkImplicitStateMachines(cleanedLines, filePath, { directives, rawLines, commentLines }),
     ...checkTestRunnerBranching(source, cleanedLines, filePath),
   ];
@@ -306,6 +312,7 @@ export function checkSource(source, filePath) {
     ...checkFunctionBlocks(functions, lines, filePath),
     ...checkTernariesAndEmptyCatches(cleaned, lines, filePath),
     ...checkImplicitStateMachines(lines, filePath, { directives, rawLines, commentLines }),
+    ...checkModuleSizeAndPacking(lines, filePath, { fnCount: functions.length, commentLines, directives }),
     ...checkTestRunnerBranching(source, lines, filePath),
   ];
   const kept = filterSuppressed(rawViolations, functions, { directives, rawLines, commentLines });
@@ -380,7 +387,15 @@ function checkImplicitStateMachines(lines, filePath, { directives, rawLines, com
     seenArrow: false,
   };
   for (let idx = 0; idx < lines.length; idx += 1) {
-    advanceStateMachineLine(lines[idx], idx + 1, state);
+    const lineText = lines[idx];
+    advanceStateMachineLine(lineText, idx + 1, state);
+    const isValueDone = state.declKind === "value" && state.parenDepth === 0 && state.bracketDepth === 0 && !/(?:=>|[=(\[,?:+\-*/.]|&&|\|\|)$/.test(lineText.trimEnd());
+    if (isValueDone && state.scopeStack.length > 0) {
+      state.scopeStack[state.scopeStack.length - 1].flags.push(...state.pendingFlags);
+    }
+    if (isValueDone) {
+      Object.assign(state, { pendingFlags: [], pendingStart: -1, declKind: "", seenArrow: false });
+    }
   }
   for (const scope of state.closedScopes) {
     const uniqueFlags = [...new Set(scope.flags)];
@@ -450,7 +465,9 @@ function advanceStateMachineLine(lineText, lineNo, state) {
       const parentScope = state.scopeStack.length > 0 ? state.scopeStack[state.scopeStack.length - 1] : null;
       const mergeUp = popped.isControl && parentScope !== null;
       const closedEntry = { startLine: popped.startLine, openLine: popped.openLine, prevEndLine: popped.prevEndLine, flags: popped.flags };
-      (mergeUp ? parentScope.flags : state.closedScopes).push(...(mergeUp ? popped.flags : [closedEntry]));
+      const mergeTarget = mergeUp ? parentScope.flags : state.closedScopes;
+      const mergeItems = mergeUp ? popped.flags : [closedEntry];
+      mergeTarget.push(...mergeItems);
       state.braceDepth = Math.max(0, state.braceDepth - 1);
       state.lastClosedEnd = lineNo;
       state.pendingFlags = state.parenDepth === 0 ? [] : state.pendingFlags;
@@ -483,9 +500,6 @@ function advanceStateMachineLine(lineText, lineNo, state) {
     }
   }
   if (state.pendingStart === -1 && lineText.slice(cursor).trim().length > 0) { state.pendingStart = lineNo; }
-  const isValueDone = state.declKind === "value" && state.parenDepth === 0 && state.bracketDepth === 0 && !/(?:=>|[=(\[,?:+\-*/.]|&&|\|\|)$/.test(lineText.trimEnd());
-  if (isValueDone && state.scopeStack.length > 0) { state.scopeStack[state.scopeStack.length - 1].flags.push(...state.pendingFlags); }
-  if (isValueDone) { state.pendingFlags = []; state.pendingStart = -1; state.declKind = ""; state.seenArrow = false; }
 }
 
 function checkTestRunnerBranching(source, cleanedLines, filePath) {
@@ -1441,6 +1455,85 @@ function measureTsTypeComplexity(typeNode, tsMod) {
   return { maxDepth, maxTupleWidth };
 }
 
+function checkModuleSizeAndPacking(cleanedLines, filePath, { fnCount, commentLines, directives, skipRegexPacking = false }) {
+  const violations = [];
+  const codeLineNums = cleanedLines
+    .map((line, idx) => (line.trim() && !commentLines.has(idx + 1) ? idx + 1 : 0))
+    .filter((lineNo) => lineNo > 0);
+  const firstCodeLine = codeLineNums.length > 0 ? codeLineNums[0] : cleanedLines.length + 1;
+  const hasWaiver = [...directives.entries()].some(
+    ([lineNo, dir]) => lineNo < firstCodeLine && dir.hasReason && (dir.isWildcard || dir.rules.has("CANON-01")),
+  );
+  if (!TEST_PATH_PATTERN.test(filePath) && codeLineNums.length > MAX_MODULE_CODE_LINES && fnCount > MAX_MODULE_FUNCTIONS && !hasWaiver) {
+    violations.push({
+      path: filePath,
+      line: 1,
+      rule: "CANON-01",
+      message: `Module has ${codeLineNums.length} code lines and ${fnCount} functions (max ${MAX_MODULE_CODE_LINES} lines / ${MAX_MODULE_FUNCTIONS} functions) -> split by domain responsibility into cohesive modules.`,
+    });
+  }
+  if (skipRegexPacking) {
+    return violations;
+  }
+  for (let idx = 0; idx < cleanedLines.length; idx += 1) {
+    const line = cleanedLines[idx];
+    const isTypeLiteral = /^\s*(?:export\s+)?(?:type|interface)\b/.test(line) || /\{[^{}]*:[^{}]*;[^{}]*\}/.test(line);
+    if (!/\bfor\s*\(/.test(line) && !isTypeLiteral && TS_MULTI_STMT_PATTERN.test(line)) {
+      violations.push({
+        path: filePath,
+        line: idx + 1,
+        rule: "LLM-05",
+        message: "Multiple statements packed onto one line -> format with one statement per line.",
+      });
+    }
+  }
+  return violations;
+}
+
+function checkAstPackingAndTernaries(sf, filePath, tsMod) {
+  const packedLines = new Set();
+  const condCounts = new Map();
+  const stack = [{ node: sf, inCond: false }];
+  while (stack.length > 0) {
+    const { node, inCond } = stack.pop();
+    const isContainer = tsMod.isSourceFile(node) || tsMod.isBlock(node) || tsMod.isCaseClause(node) || tsMod.isDefaultClause(node);
+    const stmtLines = isContainer ? node.statements.map((stmt) => sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1) : [];
+    stmtLines.forEach((lineNo, idx) => {
+      if (stmtLines.indexOf(lineNo) < idx) {
+        packedLines.add(lineNo);
+      }
+    });
+    const isCond = tsMod.isConditionalExpression(node);
+    if (isCond && !inCond) {
+      const lineNo = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+      condCounts.set(lineNo, (condCounts.get(lineNo) ?? 0) + 1);
+    }
+    const nextInCond = inCond || isCond;
+    node.forEachChild((child) => {
+      stack.push({ node: child, inCond: nextInCond });
+    });
+  }
+  const violations = [...packedLines]
+    .sort((left, right) => left - right)
+    .map((lineNo) => ({
+      path: filePath,
+      line: lineNo,
+      rule: "LLM-05",
+      message: "Multiple statements packed onto one line -> format with one statement per line.",
+    }));
+  for (const [lineNo, count] of [...condCounts.entries()].sort((left, right) => left[0] - right[0])) {
+    if (count >= 2 && !packedLines.has(lineNo)) {
+      violations.push({
+        path: filePath,
+        line: lineNo,
+        rule: "LLM-05",
+        message: `${count} inline conditionals packed onto one line -> split into readable statements.`,
+      });
+    }
+  }
+  return violations;
+}
+
 export function countTsLeafBodyLines(fnNode, rawLines, { commentLines, sf }) {
   const stmts = fnNode.body?.statements;
   if (!stmts || stmts.length === 0) {
@@ -1478,11 +1571,13 @@ export function normalizeTsLeafSkeleton(fnNode, tsMod) {
       tokens.push(...(node.alias ? [] : [["ID", assigned]]));
     } else if (tag === "BIND" && tsMod.isBindingElement(node)) {
       const isObjId = tsMod.isObjectBindingPattern(node.parent) && tsMod.isIdentifier(node.name);
-      const propNode = node.propertyName;
-      const staticProp = propNode && (tsMod.isIdentifier(propNode) || tsMod.isStringLiteral(propNode) || tsMod.isNumericLiteral(propNode));
-      const fallbackName = isObjId ? node.name.text : null;
-      tokens.push(["BIND_EL", isObjId ? "OBJ" : "PAT", staticProp ? propNode.text : fallbackName, Boolean(node.dotDotDotToken)]);
-      stack.push(...(node.initializer ? [["AST", node.initializer]] : []), ["BIND", node.name], ...(propNode && !staticProp ? [["AST", propNode]] : []));
+      const staticProp = node.propertyName && (tsMod.isIdentifier(node.propertyName) || tsMod.isStringLiteral(node.propertyName) || tsMod.isNumericLiteral(node.propertyName));
+      const bindProp = staticProp ? node.propertyName.text : null;
+      const resolvedProp = bindProp ?? (isObjId ? node.name.text : null);
+      tokens.push(["BIND_EL", isObjId ? "OBJ" : "PAT", resolvedProp, Boolean(node.dotDotDotToken)]);
+      const initOps = node.initializer ? [["AST", node.initializer]] : [];
+      const dynPropOps = node.propertyName && !staticProp ? [["AST", node.propertyName]] : [];
+      stack.push(...initOps, ["BIND", node.name], ...dynPropOps);
     } else if (tag === "BIND") {
       const children = [];
       node.forEachChild((child) => { children.push(["BIND", child]); });
@@ -1491,7 +1586,7 @@ export function normalizeTsLeafSkeleton(fnNode, tsMod) {
     } else if (tag === "FN" || tsMod.isArrowFunction(node) || tsMod.isFunctionExpression(node)) {
       const isAsync = (node.modifiers ?? []).some((mod) => mod.kind === tsMod.SyntaxKind.AsyncKeyword);
       const params = node.parameters ?? [];
-      const shape = params.map((param) => `${param.dotDotDotToken ? "..." : ""}${param.questionToken ? "?" : ""}`);
+      const shape = params.map((param) => [Boolean(param.dotDotDotToken), Boolean(param.questionToken)]);
       tokens.push(["SIG", node === fnNode, isAsync, params.length, shape]);
       scopeStack.push(new Map());
       const bodyNodes = tsMod.isBlock(node.body) ? [...node.body.statements] : [node.body];

@@ -1117,6 +1117,36 @@ class TestCheckPython(unittest.TestCase):
         good_violations = [v for v in check_python.check_source(good_code, "clean_types.py") if v.rule == "CANON-03"]
         self.assertEqual(good_violations, [], msg=str(good_violations))
 
+    def test_module_size_ceiling_preamble_waiver_and_llm05_packing(self) -> None:
+        import check_python
+
+        monolith = "\n".join(
+            f"def fn_{idx}(value: int) -> int:\n" + "".join(f"    step_{step} = value + {step}\n" for step in range(28)) + "    return value\n"
+            for idx in range(16)
+        )
+        size_viols = [v for v in check_python.check_source(monolith, "src/big.py") if v.rule == "CANON-01" and v.line == 1]
+        self.assertEqual(len(size_viols), 1)
+        self.assertEqual(
+            [v for v in check_python.check_source(monolith, "tests/test_big.py") if v.rule == "CANON-01" and v.line == 1],
+            [],
+        )
+        waived = '# topdown-ignore(CANON-01, reason="standalone CLI")\n' + monolith
+        self.assertEqual(
+            [v for v in check_python.check_source(waived, "src/big.py") if v.rule == "CANON-01" and v.line == 1],
+            [],
+        )
+        table_only = "\n".join(f"ENTRY_{idx} = {idx}" for idx in range(470)) + "\ndef lookup(key: int) -> int:\n    return key\n"
+        self.assertEqual(check_python.check_source(table_only, "src/table.py"), [])
+
+        packed = (
+            "def cramped(flag_a: bool, flag_b: bool) -> int:\n"
+            "    first = 1; second = 2\n"
+            "    pair = (1 if flag_a else 2, 3 if flag_b else 4)\n"
+            "    return first + second + pair[0]\n"
+        )
+        llm05 = [v for v in check_python.check_source(packed, "src/packed.py") if v.rule == "LLM-05"]
+        self.assertEqual(len(llm05), 2, msg=str(llm05))
+
 
 if __name__ == "__main__":
     unittest.main()
