@@ -48,9 +48,16 @@ class ReceiptStats:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["init"]:
+        from engine.init_cmd import run_init_cli
+
+        return run_init_cli(sys.argv[2:])
     options = parse_cli_args(sys.argv[1:])
     if options is None:
-        print("Usage: topdown [--json] [--outline] [--receipt] [--config topdown.toml] <path> [...]", file=sys.stderr)
+        print(
+            "Usage: topdown [init [dir] [--dry-run] [--force] [--json]] | [--json] [--outline] [--receipt] [--config topdown.toml] <path> [...]",
+            file=sys.stderr,
+        )
         return 2
     try:
         from engine.analyzer import Violation, analyze_source, outline_source

@@ -24,9 +24,12 @@ Topdown stays effective by staying **small, opinionated, and zero-dependency**. 
 
 ## Adding or Updating Enforcement Checkers
 
-- Keep `enforcement/` checkers zero-dependency by default (optional AST backends like `typescript` must fall back gracefully unless `--backend=ast` is explicitly requested).
-- To add a new language to the optional universal `tree-sitter` engine, add a single `LanguageSpec` entry to [`engine/specs.py`](engine/specs.py) (`function_nodes`, `call_nodes`, `comment_nodes` automatically enable `[L0..L3]` tier tag verification and `topdown --outline`) and a test case in `tests/test_engine.py`.
-- **AST-only call-graph & duplicate-leaf rule (`--fix`, `--outline`, `[L0..L3]` verification, `LLM-08`):** Only implement `--fix` / `--dry-run`, `--outline`, `[L0..L3]` tier verification, and `LLM-08` duplicate-leaf detection on AST-backed checkers (`check_python.py`, `check_ts.mjs --backend=ast`, `engine/`); never rewrite source code or guess call graphs or duplicate skeletons from regex/brace heuristics.
+Topdown separates enforcement into **two maintenance tiers** so new features never have to be duplicated across 3–4 separate scripts:
+
+- **Tier 1 — Standalone `PostToolUse` Hooks (Feature-Frozen at v0.5):** [`enforcement/check_python.py`](enforcement/check_python.py), [`enforcement/check_ts.mjs`](enforcement/check_ts.mjs), and [`enforcement/check_rust.py`](enforcement/check_rust.py) stay zero-dependency single-file hooks (`bug fixes only`). Do not add new full-repo workflows or cross-file rules to standalone scripts (note: [`enforcement/check_ts.mjs`](enforcement/check_ts.mjs) preserves its optional `typescript` AST fallback unless `--backend=ast` is requested).
+- **Tier 2 — Universal Full-Repo Engine (`engine/`):** All new multi-language rules, cross-file boundary checks, and full-repo CLI workflows (`init`, `--outline`, `--receipt`) live exclusively in `engine/`.
+- To add a new language to `engine/`, add a single `LanguageSpec` entry to [`engine/specs.py`](engine/specs.py) (`function_nodes`, `call_nodes`, `comment_nodes` automatically enable `[L0..L3]` tier tag verification and `topdown --outline`) and a test case in `tests/test_engine.py`.
+- **AST-only call-graph & duplicate-leaf rule (`--fix`, `--outline`, `[L0..L3]` verification, `LLM-08`, complex inline types):** Only implement structural AST passes on AST-backed checkers (`engine/` and Tier-1 AST modes); never rewrite source code or guess call graphs or duplicate skeletons from regex/brace heuristics.
 - **Contiguous header rule (all checkers):** Every checker's `filter_suppressed` must walk contiguous leading comments, `[L0..L3]` signposts, JSDoc/rustdoc block comments, and outer attributes/decorators (`#[...]`, `@decorator`) above a declaration so stacking `topdown-ignore` and `[L0..L3]` works uniformly across AST and heuristic paths.
 - Add unit tests in `tests/` and idiomatic zero-waiver cases in `tests/positive_witness/`.
 - **Dogfood everything before opening a PR:**

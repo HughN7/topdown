@@ -9,9 +9,8 @@ Unconstrained coding agents tend to produce 300-line monolithic functions, deepl
 No installer or CLI required. Pick only the files your repo uses to keep agent context lean (~80–120 lines total):
 
 1. **Add rules to `AGENTS.md`:** Copy or reference [`core/base.md`](core/base.md), your language pack from [`languages/`](languages/), and any applicable profile from [`zones/`](zones/).
-2. **Enable linters & checks:** Copy the linter snippet from your language pack (`pyproject.toml`, `.oxlintrc.json` / `eslint.config.js`, `clippy.toml`, or `.swiftlint.yml`), optionally drop in the matching script from [`enforcement/`](enforcement/), and add [`enforcement/ci_escape_hatch.yml`](enforcement/ci_escape_hatch.yml) to `.github/workflows/`.
-3. **Or hand it to your agent:**
-   > Read `https://github.com/HughN7/topdown` and adopt `core/base.md` plus the matching `languages/` pack, `zones/` profile, and linter config into this repo's `AGENTS.md`.
+2. **Or run `topdown init` / hand it to your agent:** Run `python3 -m engine.cli init` (non-destructive: creates a starter `topdown.toml` if missing, detects languages, and never overwrites `AGENTS.md`), or point your coding agent at Topdown:
+   > Read `https://github.com/HughN7/topdown` and run `topdown init --dry-run --json` on this repo, then configure `AGENTS.md`, `topdown.toml`, `PostToolUse` hooks (`enforcement/run_hook.py`), and `enforcement/ci_escape_hatch.yml` for the detected languages and zones without clobbering existing project settings.
 
 ## How It's Structured
 
@@ -47,11 +46,14 @@ If you want one real AST engine across Python, TypeScript/JS, Rust, Swift, and G
 uvx --from git+https://github.com/HughN7/topdown.git topdown src/
 pip install git+https://github.com/HughN7/topdown.git
 
-topdown src/                          # Single-file AST checks across all 5 languages (zero config)
-topdown --outline src/                # 1-second architectural X-Ray ([L0..L3] tiers, line spans, callers/callees)
-topdown --receipt src/                # Deterministic Markdown PR verification receipt (compliance, waivers, boundaries)
-topdown --config topdown.toml src/    # Adds opt-in cross-file CANON-02 I/O boundary checks
+topdown init [dir] [--dry-run] [--json]  # Detect languages, emit agent manifest & starter topdown.toml
+topdown src/                             # AST checks across all 5 languages (zero config)
+topdown --outline src/                   # 1-second architectural X-Ray ([L0..L3] tiers, spans, callers/callees)
+topdown --receipt src/                   # Deterministic Markdown PR verification receipt
+topdown --config topdown.toml src/       # Adds opt-in cross-file CANON-02 I/O boundary checks
 ```
+
+Topdown enforces rules cleanly standalone for **both** new files and iterative full-repo refactors (via `topdown --outline`, `topdown --receipt`, module-size/complexity caps, and `--config topdown.toml`), and pairs well with read-only code-graph / semantic search indexers (which aid cross-repo navigation while Topdown enforces write-time architecture with zero external runtime dependencies). For contributors: standalone scripts in `enforcement/` stay frozen as zero-dependency single-file hooks (`Tier 1`), while new multi-language rules and repo-wide CLI workflows live in `engine/` (`Tier 2`; see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 Inspect module layout with `--outline` (`topdown --outline`, `check_python.py --outline`, or `check_ts.mjs --outline`) before adding new helpers to avoid `LLM-08` duplicate leaves. Topdown **never assumes directory names** (`core/`, `domain/`, etc.) on external repos. Cross-file `CANON-02` checks run *only* when you explicitly declare `pure_dirs` in `topdown.toml`:
 
