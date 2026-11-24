@@ -699,11 +699,18 @@ class TestCheckRust(unittest.TestCase):
             for idx in range(16)
         )
         self.assertEqual(len([v for v in check_rust.check_source(monolith, "src/big.rs") if v.rule == "CANON-01" and v.line == 1]), 1)
-        self.assertEqual(len([v for v in check_rust.check_source(monolith, "tests/big.rs") if v.rule == "CANON-01" and v.line == 1]), 0)
+        self.assertEqual(len([v for v in check_rust.check_source(monolith, "test/big.rs") if v.rule == "CANON-01" and v.line == 1]), 0)
         waived = '// topdown-ignore(CANON-01, reason="standalone CLI")\n' + monolith
         self.assertEqual(len([v for v in check_rust.check_source(waived, "src/big.rs") if v.rule == "CANON-01" and v.line == 1]), 0)
 
-        packed = "pub fn cramped(value: i32) -> i32 {\n    let first = value + 1; let second = first + 2;\n    second\n}\n"
+        packed = (
+            "pub fn make_buf() -> [u8; 32] {\n"
+            "    let buf = [0u8; 32];\n"
+            "    let vec_buf = vec![0; 16];\n"
+            "    let first = 1; let second = 2;\n"
+            "    buf\n"
+            "}\n"
+        )
         self.assertEqual(len([v for v in check_rust.check_source(packed, "src/packed.rs") if v.rule == "LLM-05"]), 1)
 
 

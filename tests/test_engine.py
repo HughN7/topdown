@@ -1390,9 +1390,20 @@ class TestUniversalEngine(unittest.TestCase):
         waived = '# topdown-ignore(CANON-01, reason="standalone CLI")\n' + monolith
         self.assertEqual(len([v for v in analyze_source(waived, "src/big.py") if v.rule == "CANON-01" and v.line == 1]), 0)
 
-        packed = "def cramped(value: int) -> int:\n    first = value + 1; second = first + 2\n    return second\n"
+        packed = (
+            "def cramped(flag_a: bool, flag_b: bool) -> int:\n"
+            "    first = 1; second = 2\n"
+            "    pair = (1 if flag_a else 2, 3 if flag_b else 4)\n"
+            "    return first + second + pair[0]\n"
+        )
         llm05 = [v for v in analyze_source(packed, "src/packed.py") if v.rule == "LLM-05"]
-        self.assertEqual(len(llm05), 1, msg=str(llm05))
+        self.assertEqual(len(llm05), 2, msg=str(llm05))
+
+        rust_inline_attr = "#[inline] pub fn fast() -> i64 {\n    1\n}\n"
+        self.assertEqual([v for v in analyze_source(rust_inline_attr, "src/fast.rs") if v.rule == "LLM-05"], [])
+
+        go_packed = "package sample\n\nfunc packed() int {\n    a := 1; b := 2\n    return a + b\n}\n"
+        self.assertEqual(len([v for v in analyze_source(go_packed, "src/packed.go") if v.rule == "LLM-05"]), 1)
 
 
 if __name__ == "__main__":

@@ -1476,9 +1476,11 @@ function checkModuleSizeAndPacking(cleanedLines, filePath, { fnCount, commentLin
     return violations;
   }
   for (let idx = 0; idx < cleanedLines.length; idx += 1) {
-    const line = cleanedLines[idx];
-    const isTypeLiteral = /^\s*(?:export\s+)?(?:type|interface)\b/.test(line) || /\{[^{}]*:[^{}]*;[^{}]*\}/.test(line);
-    if (!/\bfor\s*\(/.test(line) && !isTypeLiteral && TS_MULTI_STMT_PATTERN.test(line)) {
+    const strippedFor = cleanedLines[idx].replace(/\bfor\s*\([^)]*\)/g, "for ()");
+    const isTypeDecl = /^\s*(?:export\s+)?(?:type|interface)\b|^\s*\|\s*\{/.test(strippedFor);
+    const hasStmtTokens = /=>|\b(?:const|let|var|return|throw|break|continue)\b/.test(strippedFor);
+    const isInlineTypeSig = !hasStmtTokens && /:\s*\{.*\}.*\)/.test(strippedFor);
+    if (!isTypeDecl && !isInlineTypeSig && TS_MULTI_STMT_PATTERN.test(strippedFor)) {
       violations.push({
         path: filePath,
         line: idx + 1,

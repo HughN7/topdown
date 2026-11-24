@@ -256,18 +256,36 @@ def check_module_size_and_packing(
                     f"Module has {code_lines} code lines and {fn_count} functions (max {MAX_MODULE_CODE_LINES} lines / {MAX_MODULE_FUNCTIONS} functions) -> split by domain responsibility into cohesive modules.",
                 )
             )
-    block_types = frozenset({"module", "program", "source_file", "block", "statement_block", "function_body", "statements"})
+    block_types = frozenset(
+        {"module", "program", "source_file", "block", "statement_block", "function_body", "statements", "statement_list"}
+    )
+    cond_types = frozenset({"conditional_expression", "ternary_expression"})
     packed_lines: set[int] = set()
-    stack = [root_node]
+    cond_counts: dict[int, int] = {}
+    stack: list[tuple[Any, bool]] = [(root_node, False)]
     while stack:
-        node = stack.pop()
+        node, in_cond = stack.pop()
         if node.type in block_types:
-            stmt_lines = [ch.start_point[0] + 1 for ch in node.named_children if "comment" not in ch.type]
+            stmt_lines = [
+                ch.start_point[0] + 1
+                for ch in node.named_children
+                if "comment" not in ch.type and ch.type != "attribute_item"
+            ]
             packed_lines.update(ln for idx, ln in enumerate(stmt_lines) if ln in stmt_lines[:idx])
-        stack.extend(node.named_children)
+        is_cond = node.type in cond_types
+        if is_cond and not in_cond:
+            cond_line = node.start_point[0] + 1
+            cond_counts[cond_line] = cond_counts.get(cond_line, 0) + 1
+        next_in_cond = in_cond or is_cond
+        stack.extend((child, next_in_cond) for child in node.named_children)
     violations.extend(
         Violation(file_path, line_no, "LLM-05", "Multiple statements packed onto one line -> format with one statement per line.")
         for line_no in sorted(packed_lines)
+    )
+    violations.extend(
+        Violation(file_path, line_no, "LLM-05", f"{count} inline conditionals packed onto one line -> split into readable statements.")
+        for line_no, count in sorted(cond_counts.items())
+        if count >= 2 and line_no not in packed_lines
     )
     return violations
 

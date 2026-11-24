@@ -31,7 +31,6 @@ FN_DECL_PATTERN = re.compile(
 NESTED_FN_PATTERN = re.compile(r"\bfn\s+[A-Za-z_]\w*")
 UNWRAP_PATTERN = re.compile(r"\.(?:unwrap|unwrap_or_default)\s*\(")
 CFG_TEST_PATTERN = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
-TEST_PATH_PATTERN = re.compile(r"(?:^|[\\/])tests[\\/]|_test\.rs$", re.IGNORECASE)
 SKIP_DIRS = frozenset({".git", "target", ".venv", "node_modules"})
 CHAR_LITERAL_PATTERN = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F_]+\}|.)|[^'\\])'")
 RAW_STRING_START_PATTERN = re.compile(r'(?:[bc])?r(#*)"')
@@ -289,7 +288,9 @@ def check_module_size_and_packing(
                 )
             )
     for idx, line in enumerate(cleaned_lines, start=1):
-        if MULTI_STMT_PATTERN.search(line):
+        stripped_brackets = re.sub(r"\[[^\[\]]*\]", "[]", line)
+        stripped_brackets = re.sub(r"\[[^\[\]]*\]", "[]", stripped_brackets)
+        if MULTI_STMT_PATTERN.search(stripped_brackets):
             violations.append(
                 Violation(
                     file_path,
