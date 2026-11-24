@@ -22,15 +22,32 @@ const RULE_ID_PATTERN = /\b(?:CANON|LLM)-\d{2}\b/g;
 const TIER_TAG_PATTERN = /^\s*\/\/\s*\[L([0-3])\](?:\s|$)/;
 const TS_HEADER_COMMENT_PATTERN = /^(?:\/\/|\/\*+)\s*(?:@ts-|eslint-disable|copyright\b|license\b|spdx-license-identifier\b)/i;
 const FUNC_DECL_PATTERN = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\b/;
-const ARROW_DECL_PATTERN = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$]\w*\s*=\s*(?:async\s*)?\(/;
-const CONTROL_OPEN_PATTERN = /\b(?:if|for|while|switch|try)\b[^{]*\{|(?<!\.)\bcatch\b[^{]*\{|\belse\s*\{/;
+const ARROW_DECL_PATTERN =
+  /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$]\w*\s*=\s*(?:async\s*)?(?:<[^>]*>\s*)?\(/;
+const FN_EVENT_PATTERN = /=>|[{};\[\]()]/g;
+const TS_CONTROL_WORDS = new Set(["if", "else", "for", "while", "switch", "try", "catch"]);
+const TS_NESTING_TOKEN_PATTERN =
+  /\/\/.*|(?<!\.)\b(?:if|else|for|while|switch|try|catch|return|throw|break|continue)\b(?!\s*:)|[{}\(\)\[\];]/g;
+const TS_HEADER_PAIR_MAP = { "]": "[", ")": "(", "}": "{" };
+const TS_HEADER_NOISE_PATTERN =
+  /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/.*/g;
+const PAREN_DELTAS = { "(": 1, ")": -1 };
+const BRACKET_DELTAS = { "[": 1, "]": -1 };
 const EMPTY_CATCH_FULL_PATTERN = /\bcatch\s*(?:\([^)]*\))?\s*\{\s*\}/g;
 const TEST_RUNNER_BRANCH_PATTERN =
   /\bprocess\.env\.(?:VITEST|JEST_WORKER_ID)\b|\bprocess\.env\.NODE_ENV\s*===?\s*["']test["']/;
 const TEST_PATH_PATTERN =
   /(?:^|[\\/])(?:tests?|__tests__)[\\/]|\.(?:test|spec)\.[a-z]+$/i;
-const LIFECYCLE_BOOL_DECL_PATTERN =
-  /\b((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle|_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle))|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\b(?:\s*\??\s*:\s*boolean\b|\s*=\s*(?:true|false|\$state\s*\(\s*(?:true|false)\s*\)))|\[\s*((?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle|_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle))|(?:loading|pending|fetching|submitting|errored|failed|succeeded))\s*,[^\]]*\]\s*=\s*(?:React\.)?useState\b/g;
+const LIFECYCLE_BOOL_NAME =
+  "(?:(?:is|has|was)(?:Loading|Pending|Fetching|Submitting|Saving|Retrying|Error|Errored|Failed|Rejected|Success|Succeeded|Loaded|Ready|Done|Completed|Idle|_(?:loading|pending|fetching|submitting|saving|retrying|error|errored|failed|rejected|success|succeeded|loaded|ready|done|completed|idle))|(?:loading|pending|fetching|submitting|errored|failed|succeeded))";
+const LIFECYCLE_BOOL_DECL_PATTERN = new RegExp(
+  `\\b(${LIFECYCLE_BOOL_NAME})\\b(?:\\s*\\??\\s*:\\s*boolean\\b|\\s*=\\s*(?:true|false|\\$state(?:\\s*<\\s*boolean\\s*>|\\s*\\(\\s*(?:true|false)\\s*\\))))|\\[\\s*(${LIFECYCLE_BOOL_NAME})\\s*,[^\\]]*\\]\\s*=\\s*(?:React\\.)?useState\\b`,
+  "g",
+);
+const TS_STATE_MACHINE_TOKEN_PATTERN = new RegExp(
+  `=>|(?<!\\.)\\b(?:if|else|for|while|switch|try|catch|return|throw|break|continue|const|let|var|function)\\b(?!\\s*:)|${LIFECYCLE_BOOL_DECL_PATTERN.source}|[{}\\[\\]()\\;]`,
+  "g",
+);
 const REGEX_PRECEDING_CHARS = new Set(["", "(", "[", "{", ",", ":", ";", "=", "!", "&", "|", "?", "+", "-", "*", "%", "~", "^", ">", "\n"]);
 const REGEX_PRECEDING_KEYWORDS = new Set(["return", "case", "default", "throw", "in", "of", "typeof", "void", "delete", "new", "yield", "await"]);
 
@@ -94,7 +111,16 @@ function runTsOutline(files, asJson, tsMod) {
     }
     const isJsx = /\.[jt]sx$/i.test(filePath);
     const lexed = lexSource(readResult.source, isJsx);
-    const functions = buildAstFileOutline({ source: readResult.source, filePath, lexed }, tsMod);
+    const sf = tsMod.createSourceFile(filePath, readResult.source, tsMod.ScriptTarget.Latest, true);
+    const topFunctions = collectTopLevelAstFunctions(sf, tsMod);
+    const rawLines = readResult.source.split("\n");
+    const tierCtx = collectAstModuleTierContext(topFunctions, filePath, {
+      rawLines,
+      lineCommentLines: lexed.lineCommentLines,
+      commentLines: lexed.commentLines,
+      tsMod,
+    });
+    const functions = buildAstOutlineEntries(topFunctions, tierCtx);
     payload.push({ path: filePath, functions });
   }
   const output = asJson ? `${JSON.stringify(payload, null, 2)}\n` : `${formatOutlineText(payload)}\n`;
@@ -137,44 +163,19 @@ export async function loadTypeScript() {
   }
 }
 
-function buildAstFileOutline({ source, filePath, lexed }, tsMod) {
+export function buildAstFileOutline(source, filePath, tsMod) {
+  const isJsx = /\.[jt]sx$/i.test(filePath);
+  const lexed = lexSource(source, isJsx);
   const sf = tsMod.createSourceFile(filePath, source, tsMod.ScriptTarget.Latest, true);
   const topFunctions = collectTopLevelAstFunctions(sf, tsMod);
   const rawLines = source.split("\n");
-  const allEndLines = topFunctions.map((entry) => entry.endLine);
-  const nameSet = new Set(topFunctions.map((entry) => entry.name));
-  const callGraph = new Map();
-  const declaredTags = new Map();
-  for (const entry of topFunctions) {
-    const callees = collectAstCalls(entry.node, nameSet, tsMod);
-    callees.delete(entry.name);
-    callGraph.set(entry.name, callees);
-    const prevEnd = Math.max(0, ...allEndLines.filter((end) => end < entry.startLine));
-    const leading = collectContiguousHeaderLines(rawLines, entry.startLine, {
-      prevEndLine: prevEnd,
-      commentLines: lexed.commentLines,
-    });
-    const { tag } = extractAstTierTags(rawLines, leading, lexed.lineCommentLines);
-    declaredTags.set(entry.name, tag);
-  }
-  const names = topFunctions.map((entry) => entry.name);
-  const distMap = computeAllPairsLongestPaths(names, callGraph);
-  const boundsMap = computeTierBounds(names, distMap, declaredTags);
-  return topFunctions.map((entry) => {
-    const tagVal = declaredTags.get(entry.name);
-    const callers = names.filter((caller) => (callGraph.get(caller) ?? new Set()).has(entry.name)).sort();
-    const callees = [...(callGraph.get(entry.name) ?? new Set())].sort();
-    return {
-      name: entry.name,
-      start_line: entry.startLine,
-      end_line: entry.endLine,
-      line_count: entry.endLine - entry.startLine + 1,
-      declared_tier: tagVal !== null ? `L${tagVal}` : null,
-      valid_tiers: boundsMap.get(entry.name).validTiers,
-      callers,
-      callees,
-    };
+  const tierCtx = collectAstModuleTierContext(topFunctions, filePath, {
+    rawLines,
+    lineCommentLines: lexed.lineCommentLines,
+    commentLines: lexed.commentLines,
+    tsMod,
   });
+  return buildAstOutlineEntries(topFunctions, tierCtx);
 }
 
 export function checkSourceWithAst(source, filePath, tsMod) {
@@ -187,14 +188,34 @@ export function checkSourceWithAst(source, filePath, tsMod) {
   const allFunctions = [...topFunctions, ...memberFunctions];
   const rawLines = source.split("\n");
   const cleanedLines = cleaned.split("\n");
+  const tierCtx = collectAstModuleTierContext(topFunctions, filePath, {
+    rawLines,
+    lineCommentLines,
+    commentLines,
+    tsMod,
+  });
   const rawViolations = [
+    ...tierCtx.multiTagViolations,
     ...checkAstOrderAndDepth(topFunctions, filePath, tsMod),
-    ...checkAstTierTags(topFunctions, filePath, { rawLines, lineCommentLines, commentLines, tsMod }),
+    ...checkAstTierTags(topFunctions, filePath, tierCtx),
+    ...checkAstDuplicateLeaves(topFunctions, {
+      filePath,
+      rawLines,
+      commentLines,
+      callGraph: tierCtx.callGraph,
+      declaredTags: tierCtx.declaredTags,
+      sf,
+      tsMod,
+    }),
     ...checkAstFunctionRules(allFunctions, { sf, tsMod, filePath }),
     ...checkImplicitStateMachines(cleanedLines, filePath, { directives, rawLines, commentLines }),
     ...checkTestRunnerBranching(source, cleanedLines, filePath),
   ];
-  const spans = allFunctions.map((entry) => ({ startLine: entry.startLine, endLine: entry.endLine }));
+  const spans = allFunctions.map((entry) => ({
+    startLine: entry.startLine,
+    outerStartLine: entry.outerStartLine ?? entry.startLine,
+    endLine: entry.endLine,
+  }));
   const kept = filterSuppressed(rawViolations, spans, { directives, rawLines, commentLines });
   return [...ignoreViolations, ...kept].sort(
     (left, right) => left.line - right.line || left.rule.localeCompare(right.rule),
@@ -216,13 +237,16 @@ export function fixSourceWithAst(source, filePath, tsMod) {
   if (fnPositions.length < 2) {
     return { source, refusal: null };
   }
+  if (new Set(fnPositions.map((entry) => entry.name)).size !== fnPositions.length) {
+    return { source, refusal: "Refused --fix: duplicate top-level function names detected." };
+  }
   const firstPos = fnPositions[0].idx;
   const lastPos = fnPositions[fnPositions.length - 1].idx;
   if (lastPos - firstPos + 1 !== fnPositions.length) {
     return { source, refusal: "Refused --fix: interleaved statements or non-hoisted declarations between top-level functions." };
   }
-  const nameSet = new Set(fnPositions.map((entry) => entry.name));
-  const callGraph = new Map(fnPositions.map((entry) => [entry.name, collectAstCalls(entry.stmt, nameSet, tsMod)]));
+  const keysByName = new Map(fnPositions.map((entry) => [entry.name, [entry.name]]));
+  const callGraph = new Map(fnPositions.map((entry) => [entry.name, collectAstCalls(entry.stmt, keysByName, tsMod)]));
   const ordered = topoSortAstFunctions(fnPositions, callGraph);
   if (!ordered) {
     return { source, refusal: "Refused --fix: cyclic/mutual recursion detected in local call graph." };
@@ -301,7 +325,7 @@ function checkFunctionBlocks(functions, lines, filePath) {
         message: `Function starting at line ${fnSpan.startLine} is ${length} lines (max ${MAX_FUNCTION_LINES}) -> extract a cohesive L1/L2 pure helper.`,
       });
     }
-    const maxNesting = measureControlNesting(lines, fnSpan.bodyStartLine, fnSpan.endLine);
+    const maxNesting = measureControlNesting(lines, fnSpan);
     if (maxNesting > MAX_NESTING_DEPTH) {
       violations.push({
         path: filePath,
@@ -341,54 +365,32 @@ function checkTernariesAndEmptyCatches(cleaned, lines, filePath) {
 
 function checkImplicitStateMachines(lines, filePath, { directives, rawLines, commentLines }) {
   const violations = [];
-  const scopeStack = [];
-  const closedScopes = [];
-  let parenDepth = 0;
-  let pendingStart = -1;
-  let pendingFlags = [];
+  const state = {
+    scopeStack: [],
+    closedScopes: [],
+    pendingFlags: [],
+    pendingControls: [],
+    parenDepth: 0,
+    bracketDepth: 0,
+    braceDepth: 0,
+    pendingStart: -1,
+    lastClosedEnd: 0,
+    declKind: "",
+    seenArrow: false,
+  };
   for (let idx = 0; idx < lines.length; idx += 1) {
-    const lineText = lines[idx];
-    const lineNo = idx + 1;
-    const trimmed = lineText.trim();
-    if (pendingStart === -1 && trimmed.length > 0) {
-      pendingStart = lineNo;
-    }
-    const matched = [...lineText.matchAll(LIFECYCLE_BOOL_DECL_PATTERN)].map((m) => m[1] ?? m[2]);
-    parenDepth = Math.max(0, parenDepth + countChar(lineText, "(") - countChar(lineText, ")"));
-    const opens = countChar(lineText, "{");
-    const closes = countChar(lineText, "}");
-    const isControl = CONTROL_OPEN_PATTERN.test(lineText);
-    for (let openIdx = 0; openIdx < opens; openIdx += 1) {
-      scopeStack.push({
-        startLine: pendingStart !== -1 ? pendingStart : lineNo,
-        openLine: lineNo,
-        flags: [...pendingFlags],
-        isControl,
-      });
-      pendingStart = -1;
-      pendingFlags = [];
-    }
-    if (scopeStack.length > 0 && parenDepth === 0) {
-      scopeStack[scopeStack.length - 1].flags.push(...matched);
-    } else {
-      pendingFlags.push(...matched);
-    }
-    const popCount = Math.min(closes, scopeStack.length);
-    for (let closeIdx = 0; closeIdx < popCount; closeIdx += 1) {
-      const popped = scopeStack.pop();
-      const targetFlags = popped.isControl && scopeStack.length > 0 ? scopeStack[scopeStack.length - 1].flags : popped.flags;
-      targetFlags.push(...(targetFlags !== popped.flags ? popped.flags : []));
-      closedScopes.push({ ...popped, flags: popped.isControl ? [] : popped.flags });
-    }
-    if (opens === 0 && closes === 0 && parenDepth === 0 && trimmed.endsWith(";")) {
-      pendingStart = -1;
-      pendingFlags = [];
-    }
+    advanceStateMachineLine(lines[idx], idx + 1, state);
   }
-  for (const scope of closedScopes) {
+  for (const scope of state.closedScopes) {
     const uniqueFlags = [...new Set(scope.flags)];
-    const leading = collectContiguousHeaderLines(rawLines, scope.startLine, { prevEndLine: 0, commentLines });
-    const headerLines = [...leading, ...Array.from({ length: scope.openLine - scope.startLine + 1 }, (_, offset) => scope.startLine + offset)];
+    const leading = collectContiguousHeaderLines(rawLines, scope.startLine, {
+      prevEndLine: scope.prevEndLine ?? 0,
+      commentLines,
+    });
+    const headerLines = [
+      ...leading,
+      ...Array.from({ length: scope.openLine - scope.startLine + 1 }, (_, offset) => scope.startLine + offset),
+    ];
     const isSuppressed = headerLines.some((lineNo) => {
       const directive = directives.get(lineNo);
       return Boolean(directive && directive.hasReason && (directive.isWildcard || directive.rules.has("CANON-03")));
@@ -403,6 +405,86 @@ function checkImplicitStateMachines(lines, filePath, { directives, rawLines, com
     }
   }
   return violations;
+}
+
+function advanceStateMachineLine(lineText, lineNo, state) {
+  let cursor = 0;
+  for (const match of lineText.matchAll(TS_STATE_MACHINE_TOKEN_PATTERN)) {
+    const pos = match.index;
+    const tok = match[0];
+    const boolName = match[1] ?? match[2] ?? "";
+    if (state.pendingStart === -1 && lineText.slice(cursor, pos).trim().length > 0) { state.pendingStart = lineNo; }
+    cursor = pos + tok.length;
+    if (tok !== "}" && tok !== ";" && state.pendingStart === -1 && tok.trim().length > 0) { state.pendingStart = lineNo; }
+    const top = state.pendingControls.length > 0 ? state.pendingControls[state.pendingControls.length - 1] : null;
+    const isTopDepth = top !== null && top[0] === state.parenDepth && top[1] === state.bracketDepth && top[2] === state.braceDepth;
+    if (tok === "(" || tok === ")" || tok === "[" || tok === "]") {
+      state.parenDepth = Math.max(0, state.parenDepth + (PAREN_DELTAS[tok] ?? 0));
+      state.bracketDepth = Math.max(0, state.bracketDepth + (BRACKET_DELTAS[tok] ?? 0));
+    } else if (tok === "=>") {
+      state.seenArrow = state.parenDepth === 0 && state.bracketDepth === 0 ? true : state.seenArrow;
+    } else if (tok === "const" || tok === "let" || tok === "var" || tok === "function") {
+      const resetPrev = state.scopeStack.length === 0 && state.parenDepth === 0 && state.bracketDepth === 0 && state.declKind !== "";
+      state.pendingFlags = resetPrev ? [] : state.pendingFlags;
+      state.pendingStart = resetPrev ? lineNo : state.pendingStart;
+      state.declKind = tok === "function" ? "fn" : "value";
+      state.seenArrow = false;
+    } else if (tok === ";" && (state.parenDepth > 0 || state.bracketDepth > 0)) {
+      continue;
+    } else if (tok === ";") {
+      (state.scopeStack.length > 0 ? state.scopeStack[state.scopeStack.length - 1].flags : null)?.push(...state.pendingFlags);
+      state.pendingFlags = [];
+      state.pendingStart = -1;
+      state.declKind = "";
+      state.seenArrow = false;
+      state.pendingControls = isTopDepth ? state.pendingControls.slice(0, -1) : state.pendingControls;
+    } else if (tok === "return" || tok === "throw" || tok === "break" || tok === "continue") {
+      state.pendingControls = isTopDepth ? state.pendingControls.slice(0, -1) : state.pendingControls;
+    } else if (tok === "}" && state.scopeStack.length > 0 && state.scopeStack[state.scopeStack.length - 1].isCondBrace) {
+      state.scopeStack.pop();
+      state.braceDepth = Math.max(0, state.braceDepth - 1);
+    } else if (tok === "}" && state.scopeStack.length > 0) {
+      const popped = state.scopeStack.pop();
+      popped.flags.push(...(state.parenDepth === 0 ? state.pendingFlags : []));
+      const parentScope = state.scopeStack.length > 0 ? state.scopeStack[state.scopeStack.length - 1] : null;
+      const mergeUp = popped.isControl && parentScope !== null;
+      const closedEntry = { startLine: popped.startLine, openLine: popped.openLine, prevEndLine: popped.prevEndLine, flags: popped.flags };
+      (mergeUp ? parentScope.flags : state.closedScopes).push(...(mergeUp ? popped.flags : [closedEntry]));
+      state.braceDepth = Math.max(0, state.braceDepth - 1);
+      state.lastClosedEnd = lineNo;
+      state.pendingFlags = state.parenDepth === 0 ? [] : state.pendingFlags;
+      state.pendingStart = -1;
+      state.declKind = "";
+      state.seenArrow = false;
+    } else if (tok === "}") {
+      state.braceDepth = Math.max(0, state.braceDepth - 1);
+      state.pendingStart = -1;
+      state.declKind = "";
+      state.seenArrow = false;
+    } else if (tok === "{" && top !== null && !isTopDepth) {
+      state.scopeStack.push({ startLine: lineNo, openLine: lineNo, prevEndLine: state.lastClosedEnd, flags: [], isControl: false, isCondBrace: true });
+      state.braceDepth += 1;
+    } else if (tok === "{") {
+      const scopeStart = state.pendingStart !== -1 ? state.pendingStart : lineNo;
+      state.scopeStack.push({ startLine: scopeStart, openLine: lineNo, prevEndLine: state.lastClosedEnd, flags: [...state.pendingFlags], isControl: isTopDepth, isCondBrace: false });
+      state.braceDepth += 1;
+      state.pendingStart = -1;
+      state.pendingFlags = [];
+      state.declKind = "";
+      state.seenArrow = false;
+      state.pendingControls = isTopDepth ? state.pendingControls.slice(0, -1) : state.pendingControls;
+    } else if (TS_CONTROL_WORDS.has(tok) && !isTopDepth) {
+      state.pendingControls.push([state.parenDepth, state.bracketDepth, state.braceDepth]);
+    } else if (boolName && state.scopeStack.length > 0 && state.parenDepth === 0) {
+      state.scopeStack[state.scopeStack.length - 1].flags.push(boolName);
+    } else if (boolName) {
+      state.pendingFlags.push(boolName);
+    }
+  }
+  if (state.pendingStart === -1 && lineText.slice(cursor).trim().length > 0) { state.pendingStart = lineNo; }
+  const isValueDone = state.declKind === "value" && state.parenDepth === 0 && state.bracketDepth === 0 && !/(?:=>|[=(\[,?:+\-*/.]|&&|\|\|)$/.test(lineText.trimEnd());
+  if (isValueDone && state.scopeStack.length > 0) { state.scopeStack[state.scopeStack.length - 1].flags.push(...state.pendingFlags); }
+  if (isValueDone) { state.pendingFlags = []; state.pendingStart = -1; state.declKind = ""; state.seenArrow = false; }
 }
 
 function checkTestRunnerBranching(source, cleanedLines, filePath) {
@@ -746,69 +828,136 @@ function advanceCodeChar(source, state, ch) {
 }
 
 function extractFunctions(lines) {
-  const spans = [];
-  let braceDepth = 0;
-  let parenDepth = 0;
-  let pendingStart = -1;
-  let activeStart = -1;
-  let activeBodyStart = -1;
-  let activeBaseDepth = 0;
+  const state = {
+    spans: [],
+    braceDepth: 0,
+    parenDepth: 0,
+    bracketDepth: 0,
+    pendingStart: -1,
+    pendingKind: "",
+    seenArrow: false,
+    typeBraceDepth: 0,
+    activeStart: -1,
+    activeBodyStart: -1,
+    activeBodyCol: 0,
+    activeBase: 0,
+  };
   for (let idx = 0; idx < lines.length; idx += 1) {
-    const trimmed = lines[idx].trim();
-    const opens = countChar(lines[idx], "{");
-    const closes = countChar(lines[idx], "}");
-    const openParens = countChar(lines[idx], "(");
-    const closeParens = countChar(lines[idx], ")");
-    const isDeclStart = FUNC_DECL_PATTERN.test(trimmed) || ARROW_DECL_PATTERN.test(trimmed);
-    if (activeStart === -1 && braceDepth === 0 && isDeclStart) {
-      parenDepth = 0;
-      pendingStart = idx + 1;
-    } else if (activeStart === -1 && pendingStart === -1) {
-      parenDepth = 0;
-    }
-    parenDepth += openParens - closeParens;
-    const opensBodyHere = pendingStart !== -1 && parenDepth <= 0 && opens > 0 && (opens > closes || trimmed.endsWith("{"));
-    const isSingleLineBody = pendingStart !== -1 && parenDepth <= 0 && opens > 0 && opens === closes && !trimmed.endsWith("{");
-    if (isSingleLineBody) {
-      spans.push({ startLine: pendingStart, bodyStartLine: idx + 1, endLine: idx + 1 });
-      pendingStart = -1;
-    } else if (opensBodyHere) {
-      activeStart = pendingStart;
-      activeBodyStart = idx + 1;
-      activeBaseDepth = braceDepth - (trimmed.startsWith("}") ? 1 : 0);
-      pendingStart = -1;
-    } else if (pendingStart !== -1 && parenDepth <= 0 && (trimmed.endsWith(";") || (opens === 0 && /=>\s*[^({\s]/.test(trimmed)))) {
-      pendingStart = -1;
-    }
-    braceDepth += opens - closes;
-    if (activeStart !== -1 && braceDepth <= activeBaseDepth) {
-      spans.push({ startLine: activeStart, bodyStartLine: activeBodyStart, endLine: idx + 1 });
-      activeStart = -1;
-    }
+    advanceFnSpanLine(lines[idx], idx + 1, state);
   }
-  return spans;
+  return state.spans;
 }
 
-function measureControlNesting(lines, bodyStartLine, endLine) {
-  const controlStack = [];
-  let braceDepth = 0;
-  let maxNesting = 0;
-  for (let lineNo = bodyStartLine; lineNo <= endLine; lineNo += 1) {
-    const lineText = lines[lineNo - 1];
-    const trimmed = lineText.trim();
-    const leadingCloses = trimmed.length - trimmed.replace(/^\}+/, "").length;
-    const opens = lineText.split("{").length - 1;
-    const closes = lineText.split("}").length - 1;
-    braceDepth -= leadingCloses;
-    while (controlStack.length > 0 && braceDepth <= controlStack[controlStack.length - 1]) {
-      controlStack.pop();
+function advanceFnSpanLine(lineText, lineNo, state) {
+  let segStart = 0;
+  for (const match of lineText.matchAll(FN_EVENT_PATTERN)) {
+    const pos = match.index;
+    const tok = match[0];
+    const declSlice = lineText.slice(segStart, pos + (tok === "(" ? 1 : 0)).replace(/^[};\s]+/, "");
+    const canStartDecl = state.activeStart === -1 && state.braceDepth === 0 && state.parenDepth === 0 && state.bracketDepth === 0;
+    if (canStartDecl && FUNC_DECL_PATTERN.test(declSlice)) {
+      state.pendingStart = lineNo;
+      state.pendingKind = "fn";
+      state.seenArrow = false;
+      state.typeBraceDepth = 0;
+    } else if (canStartDecl && tok === "(" && ARROW_DECL_PATTERN.test(declSlice)) {
+      state.pendingStart = lineNo;
+      state.pendingKind = "arrow";
+      state.seenArrow = false;
+      state.typeBraceDepth = 0;
     }
-    if (lineNo > bodyStartLine && CONTROL_OPEN_PATTERN.test(lineText)) {
+    if (tok === "=>") {
+      state.seenArrow = state.parenDepth === 0 && state.typeBraceDepth === 0 ? true : state.seenArrow;
+    } else if (tok === "(" || tok === ")") {
+      state.parenDepth = Math.max(0, state.parenDepth + (PAREN_DELTAS[tok] ?? 0));
+    } else if (tok === "[" || tok === "]") {
+      state.bracketDepth = Math.max(0, state.bracketDepth + (BRACKET_DELTAS[tok] ?? 0));
+      segStart = tok === "]" && state.bracketDepth === 0 && state.activeStart === -1 && state.pendingStart === -1 ? pos + 1 : segStart;
+    } else if (tok === ";" && state.parenDepth === 0 && state.bracketDepth === 0 && state.typeBraceDepth === 0) {
+      state.pendingStart = -1;
+      state.pendingKind = "";
+      segStart = state.activeStart === -1 ? pos + 1 : segStart;
+    } else if (tok === "{" && state.pendingStart !== -1 && state.parenDepth === 0 && state.typeBraceDepth === 0) {
+      const preText = lineText.slice(segStart, pos).trimEnd();
+      const isTypeObj = (state.pendingKind === "fn" || !state.seenArrow) && /[:|&]$/.test(preText);
+      const invalidArrow = state.pendingKind === "arrow" && !state.seenArrow && !isTypeObj;
+      state.typeBraceDepth += isTypeObj ? 1 : 0;
+      const opensBody = !isTypeObj && !invalidArrow;
+      state.activeStart = opensBody ? state.pendingStart : state.activeStart;
+      state.activeBodyStart = opensBody ? lineNo : state.activeBodyStart;
+      state.activeBodyCol = opensBody ? pos : state.activeBodyCol;
+      state.activeBase = opensBody ? state.braceDepth : state.activeBase;
+      state.pendingStart = isTypeObj ? state.pendingStart : -1;
+      state.pendingKind = isTypeObj ? state.pendingKind : "";
+    } else if (tok === "}" && state.typeBraceDepth > 0) {
+      state.typeBraceDepth -= 1;
+    }
+    if (tok === "{") {
+      state.braceDepth += 1;
+      segStart = pos + 1;
+    } else if (tok === "}") {
+      state.braceDepth = Math.max(0, state.braceDepth - 1);
+      segStart = pos + 1;
+    }
+    if (tok === "}" && state.activeStart !== -1 && state.braceDepth <= state.activeBase) {
+      state.spans.push({ startLine: state.activeStart, bodyStartLine: state.activeBodyStart, endLine: lineNo, bodyStartCol: state.activeBodyCol, endCol: pos + 1 });
+      state.activeStart = -1;
+    }
+  }
+  const tail = lineText.slice(segStart).replace(/^[};\s]+/, "");
+  if (state.activeStart === -1 && state.pendingStart === -1 && state.braceDepth === 0 && FUNC_DECL_PATTERN.test(tail)) {
+    state.pendingStart = lineNo;
+    state.pendingKind = "fn";
+    state.seenArrow = false;
+    state.typeBraceDepth = 0;
+  } else if (state.pendingStart !== -1 && state.pendingKind === "arrow" && state.parenDepth === 0 && state.typeBraceDepth === 0 && state.seenArrow && /=>\s*[^({\s]/.test(lineText.slice(segStart))) {
+    state.pendingStart = -1;
+    state.pendingKind = "";
+  }
+}
+
+function measureControlNesting(lines, fnSpan) {
+  const bodyStartCol = fnSpan.bodyStartCol ?? 0;
+  const endCol = fnSpan.endCol ?? null;
+  const chunks = [];
+  for (let ln = fnSpan.bodyStartLine; ln <= fnSpan.endLine; ln += 1) {
+    const raw = lines[ln - 1] ?? "";
+    const start = ln === fnSpan.bodyStartLine ? bodyStartCol : 0;
+    const end = ln === fnSpan.endLine && endCol !== null ? endCol : raw.length;
+    chunks.push(raw.slice(start, end));
+  }
+  const bodyText = chunks.join("\n");
+  const controlStack = [];
+  let pendingControls = [];
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let maxNesting = 0;
+  for (const match of bodyText.matchAll(TS_NESTING_TOKEN_PATTERN)) {
+    const tok = match[0];
+    if (tok.startsWith("//") || (braceDepth === 0 && tok !== "{")) {
+      continue;
+    }
+    const top = pendingControls.length > 0 ? pendingControls[pendingControls.length - 1] : null;
+    const isTopDepth = top !== null && top[0] === parenDepth && top[1] === bracketDepth && top[2] === braceDepth;
+    if (tok === "(" || tok === ")" || tok === "[" || tok === "]") {
+      parenDepth = Math.max(0, parenDepth + (PAREN_DELTAS[tok] ?? 0));
+      bracketDepth = Math.max(0, bracketDepth + (BRACKET_DELTAS[tok] ?? 0));
+    } else if (tok === ";" || tok === "return" || tok === "throw" || tok === "break" || tok === "continue") {
+      pendingControls = isTopDepth ? pendingControls.slice(0, -1) : pendingControls;
+    } else if (tok === "{" && isTopDepth) {
       controlStack.push(braceDepth);
       maxNesting = Math.max(maxNesting, controlStack.length);
+      pendingControls = pendingControls.slice(0, -1);
+      braceDepth += 1;
+    } else if (tok === "{") {
+      braceDepth += 1;
+    } else if (tok === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+    } else if (TS_CONTROL_WORDS.has(tok) && !isTopDepth) {
+      pendingControls.push([parenDepth, bracketDepth, braceDepth]);
     }
-    braceDepth += opens - (closes - leadingCloses);
-    while (controlStack.length > 0 && braceDepth <= controlStack[controlStack.length - 1]) {
+    while (tok === "}" && controlStack.length > 0 && braceDepth <= controlStack[controlStack.length - 1]) {
       controlStack.pop();
     }
   }
@@ -817,8 +966,11 @@ function measureControlNesting(lines, bodyStartLine, endLine) {
 
 function findNestedFunctions(lines, fnSpan, filePath) {
   const violations = [];
-  for (let lineNo = fnSpan.bodyStartLine + 1; lineNo <= fnSpan.endLine; lineNo += 1) {
-    if (/\bfunction\s+[A-Za-z_$]/.test(lines[lineNo - 1])) {
+  for (let lineNo = fnSpan.bodyStartLine; lineNo <= fnSpan.endLine; lineNo += 1) {
+    const raw = lines[lineNo - 1] ?? "";
+    const start = lineNo === fnSpan.bodyStartLine ? (fnSpan.bodyStartCol ?? 0) + 1 : 0;
+    const end = lineNo === fnSpan.endLine && fnSpan.endCol != null ? fnSpan.endCol : raw.length;
+    if (/\bfunction\s+[A-Za-z_$]/.test(raw.slice(start, end))) {
       violations.push({
         path: filePath,
         line: lineNo,
@@ -831,20 +983,32 @@ function findNestedFunctions(lines, fnSpan, filePath) {
 }
 
 function filterSuppressed(violations, functions, { directives, rawLines, commentLines }) {
-  const allEndLines = functions.map((fnSpan) => fnSpan.endLine);
   const spanHeaders = functions.map((fnSpan) => {
-    const prevEnd = Math.max(0, ...allEndLines.filter((end) => end < fnSpan.startLine));
-    const leading = collectContiguousHeaderLines(rawLines, fnSpan.startLine, {
+    const outer = fnSpan.outerStartLine ?? fnSpan.startLine;
+    const prevEnd = Math.max(
+      0,
+      ...functions
+        .filter((other) => other !== fnSpan && other.endLine <= outer && other.startLine <= outer)
+        .map((other) => other.endLine),
+    );
+    const leading = collectContiguousHeaderLines(rawLines, outer, {
       prevEndLine: prevEnd,
       commentLines,
     });
-    leading.add(fnSpan.startLine);
-    return { startLine: fnSpan.startLine, endLine: fnSpan.endLine, headerLines: leading };
+    for (let ln = outer; ln <= fnSpan.startLine; ln += 1) {
+      leading.add(ln);
+    }
+    return { outerStartLine: outer, startLine: fnSpan.startLine, endLine: fnSpan.endLine, headerLines: leading };
   });
-  const declStartLines = new Set(spanHeaders.map((span) => span.startLine));
+  const declStartLines = new Set(spanHeaders.flatMap((span) => [span.outerStartLine, span.startLine]));
   return violations.filter((entry) => {
     const matchedLines = spanHeaders
-      .filter((span) => span.startLine <= entry.line && entry.line <= span.endLine)
+      .filter(
+        (span) =>
+          span.outerStartLine <= entry.line &&
+          entry.line <= span.endLine &&
+          !(span.outerStartLine < span.endLine && entry.line === span.endLine && declStartLines.has(entry.line)),
+      )
       .flatMap((span) => [...span.headerLines]);
     const candidateLines = new Set([entry.line, ...matchedLines]);
     if (commentLines.has(entry.line - 1) && !declStartLines.has(entry.line)) {
@@ -897,12 +1061,34 @@ function countChar(text, target) {
 function collectTopLevelAstFunctions(sf, tsMod) {
   const functions = [];
   for (const stmt of sf.statements) {
-    if (!tsMod.isFunctionDeclaration(stmt) || !stmt.name || !stmt.body) {
-      continue;
+    if (tsMod.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
+      const startLine = sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1;
+      functions.push({
+        name: stmt.name.text,
+        node: stmt,
+        startLine,
+        outerStartLine: startLine,
+        endLine: sf.getLineAndCharacterOfPosition(stmt.getEnd()).line + 1,
+      });
+    } else if (tsMod.isVariableStatement(stmt) && (stmt.declarationList.flags & tsMod.NodeFlags.Const) !== 0) {
+      const outerStartLine = sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1;
+      const decls = stmt.declarationList.declarations.filter(
+        (decl) =>
+          tsMod.isIdentifier(decl.name) &&
+          decl.initializer &&
+          tsMod.isArrowFunction(decl.initializer) &&
+          tsMod.isBlock(decl.initializer.body),
+      );
+      functions.push(
+        ...decls.map((decl) => ({
+          name: decl.name.text,
+          node: decl.initializer,
+          startLine: sf.getLineAndCharacterOfPosition(decl.getStart(sf)).line + 1,
+          outerStartLine,
+          endLine: sf.getLineAndCharacterOfPosition(decl.initializer.getEnd()).line + 1,
+        })),
+      );
     }
-    const startLine = sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1;
-    const endLine = sf.getLineAndCharacterOfPosition(stmt.getEnd()).line + 1;
-    functions.push({ name: stmt.name.text, node: stmt, startLine, endLine });
   }
   return functions;
 }
@@ -910,16 +1096,19 @@ function collectTopLevelAstFunctions(sf, tsMod) {
 function collectAstMemberFunctions(sf, tsMod) {
   const members = [];
   for (const stmt of sf.statements) {
-    const decls = tsMod.isVariableStatement(stmt)
+    const isNonConstVar = tsMod.isVariableStatement(stmt) && (stmt.declarationList.flags & tsMod.NodeFlags.Const) === 0;
+    const decls = isNonConstVar
       ? stmt.declarationList.declarations.filter(
           (decl) => tsMod.isIdentifier(decl.name) && decl.initializer && tsMod.isArrowFunction(decl.initializer) && tsMod.isBlock(decl.initializer.body),
         )
       : [];
+    const outerVarStart = sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1;
     members.push(
       ...decls.map((decl) => ({
         name: decl.name.text,
         node: decl.initializer,
-        startLine: sf.getLineAndCharacterOfPosition(stmt.getStart(sf)).line + 1,
+        startLine: sf.getLineAndCharacterOfPosition(decl.getStart(sf)).line + 1,
+        outerStartLine: outerVarStart,
         endLine: sf.getLineAndCharacterOfPosition(decl.initializer.getEnd()).line + 1,
       })),
     );
@@ -927,39 +1116,117 @@ function collectAstMemberFunctions(sf, tsMod) {
       ? stmt.members.filter((member) => tsMod.isMethodDeclaration(member) && member.body && member.name)
       : [];
     members.push(
-      ...methods.map((member) => ({
-        name: member.name.getText(sf),
-        node: member,
-        startLine: sf.getLineAndCharacterOfPosition(member.getStart(sf)).line + 1,
-        endLine: sf.getLineAndCharacterOfPosition(member.getEnd()).line + 1,
-      })),
+      ...methods.map((member) => {
+        const firstNonDec = (member.modifiers ?? []).find((mod) => !tsMod.isDecorator(mod));
+        const sigPos = firstNonDec ? firstNonDec.getStart(sf) : member.name.getStart(sf);
+        return {
+          name: member.name.getText(sf),
+          node: member,
+          startLine: sf.getLineAndCharacterOfPosition(sigPos).line + 1,
+          outerStartLine: sf.getLineAndCharacterOfPosition(member.getStart(sf)).line + 1,
+          endLine: sf.getLineAndCharacterOfPosition(member.getEnd()).line + 1,
+        };
+      }),
     );
   }
   return members;
 }
 
+function collectAstModuleTierContext(topFunctions, filePath, { rawLines, lineCommentLines, commentLines, tsMod }) {
+  const fnKeys = topFunctions.map((entry) => `${entry.name}@${entry.startLine}`);
+  const keyToName = new Map(topFunctions.map((entry, idx) => [fnKeys[idx], entry.name]));
+  const keysByName = new Map();
+  for (let idx = 0; idx < topFunctions.length; idx += 1) {
+    const bucket = keysByName.get(topFunctions[idx].name) ?? [];
+    bucket.push(fnKeys[idx]);
+    keysByName.set(topFunctions[idx].name, bucket);
+  }
+  const callGraph = new Map();
+  const declaredTags = new Map();
+  const multiTagViolations = [];
+  for (let idx = 0; idx < topFunctions.length; idx += 1) {
+    const entry = topFunctions[idx];
+    const entryKey = fnKeys[idx];
+    const callees = collectAstCalls(entry.node, keysByName, tsMod);
+    callees.delete(entryKey);
+    callGraph.set(entryKey, callees);
+    const outer = entry.outerStartLine ?? entry.startLine;
+    const prevEnd = Math.max(
+      0,
+      ...topFunctions.filter((other) => other !== entry && other.endLine <= outer && other.startLine <= outer).map((other) => other.endLine),
+    );
+    const leading = collectContiguousHeaderLines(rawLines, outer, { prevEndLine: prevEnd, commentLines });
+    for (let ln = outer; ln < entry.startLine; ln += 1) {
+      leading.add(ln);
+    }
+    const { tag, hasMultiple } = extractAstTierTags(rawLines, leading, lineCommentLines);
+    declaredTags.set(entryKey, tag);
+    if (hasMultiple) {
+      multiTagViolations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "CANON-01",
+        message: `'${entry.name}' has multiple tier tags -> keep a single [L0]..[L3] tag.`,
+      });
+    }
+  }
+  return { callGraph, declaredTags, fnKeys, keyToName, multiTagViolations };
+}
+
+function buildAstOutlineEntries(topFunctions, { callGraph, declaredTags, fnKeys, keyToName }) {
+  const distMap = computeAllPairsLongestPaths(fnKeys, callGraph);
+  const boundsMap = computeTierBounds(fnKeys, distMap, declaredTags);
+  return topFunctions.map((entry, idx) => {
+    const entryKey = fnKeys[idx];
+    const tagVal = declaredTags.get(entryKey);
+    const callers = [...new Set(fnKeys.filter((callerKey) => (callGraph.get(callerKey) ?? new Set()).has(entryKey)).map((key) => keyToName.get(key)))].sort();
+    const callees = [...new Set([...(callGraph.get(entryKey) ?? new Set())].map((key) => keyToName.get(key)))].sort();
+    return {
+      name: entry.name,
+      start_line: entry.startLine,
+      end_line: entry.endLine,
+      line_count: entry.endLine - entry.startLine + 1,
+      declared_tier: tagVal !== null ? `L${tagVal}` : null,
+      valid_tiers: boundsMap.get(entryKey).validTiers,
+      callers,
+      callees,
+    };
+  });
+}
+
 function checkAstOrderAndDepth(topFunctions, filePath, tsMod) {
   const violations = [];
-  const nameToLine = new Map(topFunctions.map((entry) => [entry.name, entry.startLine]));
-  const nameSet = new Set(nameToLine.keys());
+  const fnKeys = topFunctions.map((entry) => `${entry.name}@${entry.startLine}`);
+  const keyToName = new Map(topFunctions.map((entry, idx) => [fnKeys[idx], entry.name]));
+  const keyToLine = new Map(topFunctions.map((entry, idx) => [fnKeys[idx], entry.startLine]));
+  const keysByName = new Map();
+  for (let idx = 0; idx < topFunctions.length; idx += 1) {
+    const bucket = keysByName.get(topFunctions[idx].name) ?? [];
+    bucket.push(fnKeys[idx]);
+    keysByName.set(topFunctions[idx].name, bucket);
+  }
   const callGraph = new Map();
-  for (const entry of topFunctions) {
-    const callees = collectAstCalls(entry.node, nameSet, tsMod);
-    callGraph.set(entry.name, callees);
+  for (let idx = 0; idx < topFunctions.length; idx += 1) {
+    const entry = topFunctions[idx];
+    const entryKey = fnKeys[idx];
+    const callees = collectAstCalls(entry.node, keysByName, tsMod);
+    callGraph.set(entryKey, callees);
     const outOfOrder = [...callees]
-      .sort()
-      .filter((callee) => callee !== entry.name && nameToLine.get(callee) < entry.startLine);
-    for (const callee of outOfOrder) {
+      .filter((calleeKey) => calleeKey !== entryKey && keyToLine.get(calleeKey) < entry.startLine)
+      .sort((left, right) => keyToName.get(left).localeCompare(keyToName.get(right)) || keyToLine.get(left) - keyToLine.get(right));
+    for (const calleeKey of outOfOrder) {
+      const calleeName = keyToName.get(calleeKey);
       violations.push({
         path: filePath,
         line: entry.startLine,
         rule: "CANON-01",
-        message: `'${entry.name}' calls '${callee}' defined above it -> move '${callee}' below '${entry.name}' for top-down order.`,
+        message: `'${entry.name}' calls '${calleeName}' defined above it -> move '${calleeName}' below '${entry.name}' for top-down order.`,
       });
     }
   }
-  for (const entry of topFunctions) {
-    const { depth, leafCallsLocal } = computeAstChainDepth(entry.name, callGraph);
+  for (let idx = 0; idx < topFunctions.length; idx += 1) {
+    const entry = topFunctions[idx];
+    const { depth, leafCallsLocal } = computeAstChainDepth(fnKeys[idx], callGraph);
     if (depth > MAX_BUSINESS_DEPTH + 1 || (depth === MAX_BUSINESS_DEPTH + 1 && leafCallsLocal)) {
       violations.push({
         path: filePath,
@@ -972,42 +1239,31 @@ function checkAstOrderAndDepth(topFunctions, filePath, tsMod) {
   return violations;
 }
 
-function checkAstTierTags(topFunctions, filePath, { rawLines, lineCommentLines, commentLines, tsMod }) {
+function checkAstTierTags(topFunctions, filePath, { callGraph, declaredTags, fnKeys, keyToName }) {
   const violations = [];
-  const allEndLines = topFunctions.map((entry) => entry.endLine);
-  const nameSet = new Set(topFunctions.map((entry) => entry.name));
-  const callGraph = new Map();
-  const declaredTags = new Map();
-  for (const entry of topFunctions) {
-    const callees = collectAstCalls(entry.node, nameSet, tsMod);
-    callees.delete(entry.name);
-    callGraph.set(entry.name, callees);
-    const prevEnd = Math.max(0, ...allEndLines.filter((end) => end < entry.startLine));
-    const leading = collectContiguousHeaderLines(rawLines, entry.startLine, {
-      prevEndLine: prevEnd,
-      commentLines,
-    });
-    const { tag, hasMultiple } = extractAstTierTags(rawLines, leading, lineCommentLines);
-    declaredTags.set(entry.name, tag);
-    if (hasMultiple) {
-      violations.push({
-        path: filePath,
-        line: entry.startLine,
-        rule: "CANON-01",
-        message: `'${entry.name}' has multiple tier tags -> keep a single [L0]..[L3] tag.`,
-      });
-    }
-  }
-  const names = topFunctions.map((entry) => entry.name);
-  const distMap = computeAllPairsLongestPaths(names, callGraph);
-  const boundsMap = computeTierBounds(names, distMap, declaredTags);
-  for (const entry of topFunctions) {
-    const tagVal = declaredTags.get(entry.name);
+  const distMap = computeAllPairsLongestPaths(fnKeys, callGraph);
+  const boundsMap = computeTierBounds(fnKeys, distMap, declaredTags);
+  for (let idx = 0; idx < topFunctions.length; idx += 1) {
+    const entry = topFunctions[idx];
+    const entryKey = fnKeys[idx];
+    const tagVal = declaredTags.get(entryKey);
     if (tagVal === null || tagVal === undefined) {
       continue;
     }
-    const { dMax, height, lb0, ub0, isAdapter } = boundsMap.get(entry.name);
+    const { dMax, height, lb0, ub0, isAdapter } = boundsMap.get(entryKey);
     const valid0 = [0, 1, 2, 3].filter((tier) => lb0 <= tier && tier <= ub0).map((tier) => `[L${tier}]`);
+    const badAncKey = fnKeys.find((ancKey) => {
+      const ancTag = declaredTags.get(ancKey);
+      const dist = distMap.get(`${ancKey}->${entryKey}`);
+      return (
+        ancKey !== entryKey &&
+        ancTag !== null &&
+        ancTag !== undefined &&
+        dist !== undefined &&
+        !(dist === 1 && ancTag === 0 && tagVal === 0 && isAdapter) &&
+        tagVal - ancTag < dist
+      );
+    });
     if (tagVal === 3 && height > 0) {
       violations.push({
         path: filePath,
@@ -1021,31 +1277,152 @@ function checkAstTierTags(topFunctions, filePath, { rawLines, lineCommentLines, 
           ? `'${entry.name}' is tagged [L${tagVal}] outside valid tier range (${valid0.join(", ")}) for depth ${dMax} and height ${height} -> update tier tag.`
           : `'${entry.name}' is tagged [L${tagVal}] in a call chain exceeding L0->L3 ceiling (depth ${dMax}, height ${height}) -> flatten call depth.`;
       violations.push({ path: filePath, line: entry.startLine, rule: "CANON-01", message });
-    }
-    const badAnc = names.find((anc) => {
-      const ancTag = declaredTags.get(anc);
-      const dist = distMap.get(`${anc}->${entry.name}`);
-      return (
-        anc !== entry.name &&
-        ancTag !== null &&
-        ancTag !== undefined &&
-        dist !== undefined &&
-        !(dist === 1 && ancTag === 0 && tagVal === 0 && isAdapter) &&
-        tagVal - ancTag < dist
-      );
-    });
-    if (badAnc) {
-      const ancTag = declaredTags.get(badAnc);
-      const ancDist = distMap.get(`${badAnc}->${entry.name}`);
-      violations.push({
-        path: filePath,
-        line: entry.startLine,
-        rule: "CANON-01",
-        message: `'${entry.name}' is tagged [L${tagVal}] at call distance ${ancDist} below '${badAnc}' ([L${ancTag}]) -> callee tier must be at least [L${ancTag + ancDist}].`,
-      });
+    } else if (badAncKey) {
+      const ancName = keyToName.get(badAncKey);
+      const ancTag = declaredTags.get(badAncKey);
+      const ancDist = distMap.get(`${badAncKey}->${entryKey}`);
+      const requiredTier = ancTag + ancDist;
+      const message =
+        requiredTier <= 3
+          ? `'${entry.name}' is tagged [L${tagVal}] at call distance ${ancDist} below '${ancName}' ([L${ancTag}]) -> callee tier must be at least [L${requiredTier}].`
+          : `'${entry.name}' is tagged [L${tagVal}] at call distance ${ancDist} below '${ancName}' ([L${ancTag}]), which exceeds L0->L3 depth -> update '${ancName}' tier tag or flatten call depth.`;
+      violations.push({ path: filePath, line: entry.startLine, rule: "CANON-01", message });
     }
   }
   return violations;
+}
+
+export function checkAstDuplicateLeaves(topFunctions, ctx) {
+  const { filePath, rawLines, commentLines, callGraph, declaredTags, tsMod } = ctx;
+  const sf = ctx.sf ?? tsMod.createSourceFile(filePath, rawLines.join("\n"), tsMod.ScriptTarget.Latest, true);
+  const violations = [];
+  const seenSkeletons = new Map();
+  for (const entry of topFunctions) {
+    const fnNode = entry.node;
+    if (!fnNode.body || !tsMod.isBlock(fnNode.body)) {
+      continue;
+    }
+    const entryKey = `${entry.name}@${entry.startLine}`;
+    const rawCallees = callGraph.get(entryKey) ?? callGraph.get(entry.name) ?? new Set();
+    const callees = new Set(rawCallees);
+    callees.delete(entryKey);
+    callees.delete(entry.name);
+    const tagVal = declaredTags.has(entryKey) ? declaredTags.get(entryKey) : declaredTags.get(entry.name);
+    if (callees.size > 0 || tagVal === 0) {
+      continue;
+    }
+    if (countTsLeafBodyLines(fnNode, rawLines, { commentLines, sf }) < 6) {
+      continue;
+    }
+    const skeleton = normalizeTsLeafSkeleton(fnNode, tsMod);
+    const firstSeen = seenSkeletons.get(skeleton);
+    if (firstSeen) {
+      violations.push({
+        path: filePath,
+        line: entry.startLine,
+        rule: "LLM-08",
+        message: `Function '${entry.name}' duplicates leaf helper '${firstSeen.name}' (line ${firstSeen.startLine}); reuse the existing helper instead of adding a duplicate.`,
+      });
+      continue;
+    }
+    seenSkeletons.set(skeleton, { name: entry.name, startLine: entry.startLine });
+  }
+  return violations;
+}
+
+export function countTsLeafBodyLines(fnNode, rawLines, { commentLines, sf }) {
+  const stmts = fnNode.body?.statements;
+  if (!stmts || stmts.length === 0) {
+    return 0;
+  }
+  const startLine = sf.getLineAndCharacterOfPosition(stmts[0].getStart(sf)).line + 1;
+  const endLine = sf.getLineAndCharacterOfPosition(stmts[stmts.length - 1].getEnd()).line + 1;
+  let count = 0;
+  for (let lineNo = startLine; lineNo <= endLine; lineNo += 1) {
+    const trimmed = (rawLines[lineNo - 1] ?? "").trim();
+    if (trimmed && !commentLines.has(lineNo) && trimmed !== "{" && trimmed !== "}" && trimmed !== "};") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+export function normalizeTsLeafSkeleton(fnNode, tsMod) {
+  const env = new Map();
+  const scopeStack = [];
+  const tokens = [];
+  let nextVar = 0;
+  const stack = [["FN", fnNode]];
+  while (stack.length > 0) {
+    const [tag, node] = stack.pop();
+    if (tag === "EMIT") { tokens.push(node); }
+    else if (tag === "POP_SCOPE") { scopeStack.pop().forEach((prev, varName) => (prev === null ? env.delete(varName) : env.set(varName, prev))); }
+    else if (tag === "BIND" && (node.alias || tsMod.isIdentifier(node))) {
+      const saved = scopeStack[scopeStack.length - 1];
+      const need = !saved.has(node.text);
+      const assigned = need ? (node.alias || `$v${nextVar}`) : env.get(node.text);
+      nextVar += need && !node.alias ? 1 : 0;
+      saved.set(node.text, need ? (env.get(node.text) ?? null) : saved.get(node.text));
+      env.set(node.text, assigned);
+      tokens.push(...(node.alias ? [] : [["ID", assigned]]));
+    } else if (tag === "BIND" && tsMod.isBindingElement(node)) {
+      const isObjId = tsMod.isObjectBindingPattern(node.parent) && tsMod.isIdentifier(node.name);
+      const propNode = node.propertyName;
+      const staticProp = propNode && (tsMod.isIdentifier(propNode) || tsMod.isStringLiteral(propNode) || tsMod.isNumericLiteral(propNode));
+      const fallbackName = isObjId ? node.name.text : null;
+      tokens.push(["BIND_EL", isObjId ? "OBJ" : "PAT", staticProp ? propNode.text : fallbackName, Boolean(node.dotDotDotToken)]);
+      stack.push(...(node.initializer ? [["AST", node.initializer]] : []), ["BIND", node.name], ...(propNode && !staticProp ? [["AST", propNode]] : []));
+    } else if (tag === "BIND") {
+      const children = [];
+      node.forEachChild((child) => { children.push(["BIND", child]); });
+      tokens.push(["OPEN", node.kind]);
+      stack.push(["EMIT", ["CLOSE", node.kind]], ...children.reverse());
+    } else if (tag === "FN" || tsMod.isArrowFunction(node) || tsMod.isFunctionExpression(node)) {
+      const isAsync = (node.modifiers ?? []).some((mod) => mod.kind === tsMod.SyntaxKind.AsyncKeyword);
+      const params = node.parameters ?? [];
+      const shape = params.map((param) => `${param.dotDotDotToken ? "..." : ""}${param.questionToken ? "?" : ""}`);
+      tokens.push(["SIG", node === fnNode, isAsync, params.length, shape]);
+      scopeStack.push(new Map());
+      const bodyNodes = tsMod.isBlock(node.body) ? [...node.body.statements] : [node.body];
+      const paramOps = params.map((param, idx) => {
+        const bindOp = node === fnNode && tsMod.isIdentifier(param.name) ? ["BIND", { text: param.name.text, alias: `$p${idx}` }] : ["BIND", param.name];
+        return [bindOp, param.initializer ? ["AST", param.initializer] : ["EMIT", ["NO_DEFAULT"]]];
+      }).reverse().flat();
+      stack.push(["EMIT", ["END_FN"]], ["POP_SCOPE", null], ...bodyNodes.reverse().map((stmt) => ["AST", stmt]), ["EMIT", ["END_PARAMS"]], ...paramOps);
+    } else if (tsMod.isPrefixUnaryExpression(node) || tsMod.isPostfixUnaryExpression(node)) {
+      tokens.push(["UNARY", node.kind, node.operator]);
+      stack.push(["EMIT", ["END_UNARY"]], ["AST", node.operand]);
+    } else if (tsMod.isBinaryExpression(node)) {
+      tokens.push(["BIN", node.operatorToken.kind]);
+      stack.push(["EMIT", ["END_BIN"]], ["AST", node.right], ["AST", node.left]);
+    } else if (tsMod.isVariableDeclarationList(node)) {
+      tokens.push(["VAR_LIST", node.flags & (tsMod.NodeFlags.Const | tsMod.NodeFlags.Let)]);
+      stack.push(["EMIT", ["END_VAR_LIST"]], ...[...node.declarations].reverse().map((decl) => ["AST", decl]));
+    } else if (tsMod.isVariableDeclaration(node)) {
+      tokens.push(["VAR_DECL"]);
+      stack.push(["EMIT", ["END_VAR_DECL"]], ...(node.initializer ? [["AST", node.initializer]] : []), ["BIND", node.name]);
+    } else if (tsMod.isShorthandPropertyAssignment(node)) {
+      tokens.push(["SHORTHAND", node.name.text, env.get(node.name.text) ?? node.name.text]);
+      stack.push(...(node.objectAssignmentInitializer ? [["AST", node.objectAssignmentInitializer]] : []));
+    } else if (tsMod.isPropertyAccessExpression(node)) {
+      tokens.push(["PROP_ACCESS", Boolean(node.questionDotToken), node.name.text]);
+      stack.push(["EMIT", ["END_PROP"]], ["AST", node.expression]);
+    } else if (tsMod.isPropertyAssignment(node)) {
+      const staticProp = tsMod.isIdentifier(node.name) || tsMod.isStringLiteral(node.name) || tsMod.isNumericLiteral(node.name);
+      tokens.push(["PROP_ASSIGN", staticProp ? node.name.text : null]);
+      stack.push(["EMIT", ["END_PROP_ASSIGN"]], ["AST", node.initializer], ...(staticProp ? [] : [["AST", node.name]]));
+    } else if (tsMod.isIdentifier(node)) { tokens.push(["ID", env.get(node.text) ?? node.text]); }
+    else if (tsMod.isLiteralExpression(node) || tsMod.isTemplateLiteralToken(node)) { tokens.push(["LIT", node.kind, node.text]); }
+    else if (!tsMod.isTypeNode(node)) {
+      const isScoped = tsMod.isBlock(node) || tsMod.isCatchClause(node) || tsMod.isForOfStatement(node) || tsMod.isForInStatement(node) || tsMod.isForStatement(node);
+      const children = [];
+      node.forEachChild((child) => { children.push(["AST", child]); });
+      scopeStack.push(...(isScoped ? [new Map()] : []));
+      tokens.push(["OPEN", node.kind]);
+      stack.push(["EMIT", ["CLOSE", node.kind]], ...(isScoped ? [["POP_SCOPE", null]] : []), ...children.reverse());
+    }
+  }
+  return JSON.stringify(tokens);
 }
 
 function checkAstFunctionRules(topFunctions, { sf, tsMod, filePath }) {
@@ -1127,17 +1504,22 @@ function scanAstFunctionBody(entry, { sf, tsMod, filePath }) {
   return violations;
 }
 
-function collectAstCalls(fnNode, nameSet, tsMod) {
+function collectAstCalls(fnNode, keysByName, tsMod) {
   const callees = new Set();
-  const stack = [fnNode.body];
+  const stack = [
+    fnNode.body,
+    ...(fnNode.parameters ?? []).map((param) => param.initializer).filter(Boolean),
+  ];
   while (stack.length > 0) {
     const current = stack.pop();
     if (!current) {
       continue;
     }
-    if (tsMod.isCallExpression(current) && tsMod.isIdentifier(current.expression) && nameSet.has(current.expression.text)) {
-      callees.add(current.expression.text);
-    }
+    const matched =
+      tsMod.isCallExpression(current) && tsMod.isIdentifier(current.expression)
+        ? keysByName.get(current.expression.text) ?? []
+        : [];
+    matched.forEach((matchedKey) => callees.add(matchedKey));
     current.forEachChild((child) => {
       stack.push(child);
     });
@@ -1230,15 +1612,61 @@ function formatOutlineText(payload) {
 
 function collectContiguousHeaderLines(rawLines, outerStart, { prevEndLine, commentLines }) {
   const collected = new Set();
+  const attrStack = [];
+  const attrLines = [];
+  const pendingDelims = [];
+  let curCode = "";
   let lineNo = outerStart - 1;
-  while (lineNo > prevEndLine && lineNo >= 1) {
-    const trimmed = (rawLines[lineNo - 1] ?? "").trim();
-    const isDecorator = trimmed.startsWith("@");
-    const isFileHeader = lineNo === 1 && TS_HEADER_COMMENT_PATTERN.test(trimmed);
-    if ((!commentLines.has(lineNo) && !isDecorator) || isFileHeader) {
+  while ((lineNo > prevEndLine && lineNo >= 1) || pendingDelims.length > 0 || (attrLines.length > 0 && attrStack.length === 0)) {
+    if (pendingDelims.length > 0 && ")]}".includes(pendingDelims[pendingDelims.length - 1])) {
+      attrStack.push(pendingDelims.pop());
+      continue;
+    }
+    if (pendingDelims.length > 0 && (attrStack.length === 0 || TS_HEADER_PAIR_MAP[attrStack[attrStack.length - 1]] !== pendingDelims[pendingDelims.length - 1])) {
+      return collected;
+    }
+    if (pendingDelims.length > 0) {
+      pendingDelims.pop();
+      attrStack.pop();
+      continue;
+    }
+    if (attrLines.length > 0 && attrStack.length === 0 && curCode.startsWith("@")) {
+      attrLines.forEach((ln) => collected.add(ln));
+      attrLines.length = 0;
+      continue;
+    }
+    if (attrLines.length > 0 && attrStack.length === 0) {
       break;
     }
-    collected.add(lineNo);
+    if (lineNo <= prevEndLine || lineNo < 1) {
+      break;
+    }
+    const rawLine = rawLines[lineNo - 1] ?? "";
+    const trimmed = rawLine.trim();
+    if (attrStack.length === 0 && lineNo === 1 && TS_HEADER_COMMENT_PATTERN.test(trimmed)) {
+      break;
+    }
+    if (attrStack.length === 0 && commentLines.has(lineNo)) {
+      collected.add(lineNo);
+      lineNo -= 1;
+      continue;
+    }
+    if (attrStack.length > 0 && commentLines.has(lineNo)) {
+      attrLines.push(lineNo);
+      lineNo -= 1;
+      continue;
+    }
+    curCode = rawLine.replace(TS_HEADER_NOISE_PATTERN, " ").trim();
+    if (attrStack.length === 0 && curCode.startsWith("@") && !/[)\]]$/.test(curCode)) {
+      collected.add(lineNo);
+      lineNo -= 1;
+      continue;
+    }
+    if (attrStack.length === 0 && !curCode.endsWith(")") && !curCode.endsWith("]")) {
+      break;
+    }
+    attrLines.push(lineNo);
+    pendingDelims.push(...[...curCode].filter((ch) => "[](){}".includes(ch)));
     lineNo -= 1;
   }
   return collected;
