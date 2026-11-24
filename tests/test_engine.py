@@ -1314,13 +1314,14 @@ class TestUniversalEngine(unittest.TestCase):
                 "def bad_fn(\n"
                 "    matrix: dict[str, dict[str, list[int]]],\n"
                 ") -> tuple[int, int, int, int]:\n"
+                "    local_wide: tuple[str, int, bool, float] = ('a', 1, True, 2.0)\n"
                 "    return (1, 2, 3, 4)\n\n"
                 '# topdown-ignore(CANON-03, reason="wire format")\n'
                 "def waived_fn() -> tuple[int, int, int, int]:\n"
                 "    return (1, 2, 3, 4)\n\n"
                 "def clean_fn(items: Optional[dict[str, list[int]]]) -> list[tuple[str, int]]:\n"
                 "    return []\n",
-                2,
+                3,
             ),
             (
                 "types.ts",
@@ -1329,6 +1330,8 @@ class TestUniversalEngine(unittest.TestCase):
                 "  return [1, 2, 3, 4];\n"
                 "}\n\n"
                 "export async function cleanFn(items: Record<string, number[]>): Promise<Readonly<Record<string, number[]>>> {\n"
+                "  type LocalRow = [number, number, number, number];\n"
+                "  const castVal = items as unknown as [number, number, number, number];\n"
                 "  return items;\n"
                 "}\n",
                 2,
@@ -1350,8 +1353,23 @@ class TestUniversalEngine(unittest.TestCase):
                 "func badFn(matrix: Dictionary<String, Array<Array<Int>>>) -> (Int, Int, Int, Int) {\n"
                 "    return (1, 2, 3, 4)\n"
                 "}\n\n"
-                "func cleanFn(items: [String: [Int]]?) -> [Int] {\n"
-                "    return []\n"
+                "func cleanFn(items: [String: [Int]]?) -> Dictionary<String, Array<()>> {\n"
+                "    typealias LocalRow = (Int, Int, Int, Int)\n"
+                "    let built = Dictionary<String, Array<Array<Int>>>()\n"
+                "    return [:]\n"
+                "}\n",
+                2,
+            ),
+            (
+                "types.go",
+                "package sample\n\n"
+                "type DeepAlias = map[string]map[string][]int\n\n"
+                "func badFn(matrix map[string]map[string][]int) [][][]int {\n"
+                "    return nil\n"
+                "}\n\n"
+                "func cleanFn(items map[string][]int) []int {\n"
+                "    _ = [2][2][2]int{}\n"
+                "    return nil\n"
                 "}\n",
                 2,
             ),
