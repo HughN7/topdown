@@ -29,7 +29,7 @@ def main() -> int:
     raw_input = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     target_path = extract_file_path(raw_input)
     if target_path is None:
-        return 0
+        return finish_clean_hook(raw_input)
     is_lock_enabled = os.environ.get("TOPDOWN_LOCK_CONFIGS", "").strip().lower() in LOCK_ENABLED_VALUES
     if is_lock_enabled and is_locked_config_path(target_path):
         print(
@@ -39,10 +39,10 @@ def main() -> int:
         )
         return 2
     if not target_path.is_file() or target_path.name.endswith(".d.ts"):
-        return 0
+        return finish_clean_hook(raw_input)
     command = build_checker_command(target_path)
     if not command:
-        return 0
+        return finish_clean_hook(raw_input)
     env = build_subprocess_env()
     proc = subprocess.run(
         command,
@@ -54,12 +54,12 @@ def main() -> int:
         check=False,
     )
     if proc.returncode == 0:
-        return 0
+        return finish_clean_hook(raw_input)
     output_parts = [part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip()]
     output = "\n".join(output_parts)
     if proc.returncode != 1:
         print(f"Topdown checker skipped ({target_path}): {output}", file=sys.stderr)
-        return 0
+        return finish_clean_hook(raw_input)
     guidance = f"Topdown violations in {target_path}:\n{output}"
     if ("CANON-01" in output or "LLM-08" in output) and supports_outline(command):
         outline = fetch_module_outline(command, env)
@@ -67,6 +67,16 @@ def main() -> int:
             guidance = f"{guidance}\nModule outline:\n{outline}"
     print(guidance, file=sys.stderr)
     return 2
+
+
+def finish_clean_hook(raw_input: str) -> int:
+    try:
+        payload = json.loads(raw_input) if raw_input.strip() else None
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict) and "hookEventName" in payload:
+        print("{}")
+    return 0
 
 
 def extract_file_path(raw_input: str) -> Path | None:
@@ -79,7 +89,14 @@ def extract_file_path(raw_input: str) -> Path | None:
     if not isinstance(payload, dict):
         return None
     tool_input = payload.get("tool_input")
+    tool_call = payload.get("toolCall")
+    tool_args = tool_call.get("args") if isinstance(tool_call, dict) else None
     candidates = [
+        tool_args.get("Path") if isinstance(tool_args, dict) else None,
+        tool_args.get("TargetFile") if isinstance(tool_args, dict) else None,
+        tool_args.get("AbsolutePath") if isinstance(tool_args, dict) else None,
+        tool_args.get("file_path") if isinstance(tool_args, dict) else None,
+        tool_args.get("path") if isinstance(tool_args, dict) else None,
         tool_input.get("file_path") if isinstance(tool_input, dict) else None,
         tool_input.get("path") if isinstance(tool_input, dict) else None,
         payload.get("file_path"),

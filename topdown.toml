@@ -1,0 +1,8 @@
+# Topdown repository configuration (all boundary checks are strictly opt-in).
+# Use bare directory prefixes relative to this file (do not append /** globs).
+
+exclude_dirs = [".superpowers", "docs"]
+
+[boundaries]
+# pure_dirs = ["engine"]
+# shell_dirs = ["enforcement", "zones"]

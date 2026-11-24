@@ -1,0 +1,16 @@
+{
+  "topdown-guard": {
+    "PostToolUse": [
+      {
+        "matcher": "edit_file|write_file|replace_file_content|multi_replace_file_content|write_to_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./run_hook.mjs",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

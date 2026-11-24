@@ -372,6 +372,35 @@ class TestRunHook(unittest.TestCase):
         self.assertIn("CANON-", bad_proc.stderr)
         self.assertNotIn("Topdown config lock", bad_proc.stderr)
 
+    def test_antigravity_post_tool_use_payload_clean_and_violating(self) -> None:
+        clean_py = ROOT_DIR / "examples" / "fixtures" / "python_after.py"
+        clean_payload = {
+            "hookEventName": "PostToolUse",
+            "toolCall": {"name": "edit_file", "args": {"Path": str(clean_py)}},
+        }
+        clean_proc = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT)],
+            input=json.dumps(clean_payload),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(clean_proc.returncode, 0, msg=clean_proc.stderr)
+        self.assertEqual(clean_proc.stdout.strip(), "{}")
+
+        bad_py = ROOT_DIR / "examples" / "fixtures" / "python_before.py"
+        bad_payload = {
+            "hookEventName": "PostToolUse",
+            "toolCall": {"name": "write_file", "args": {"TargetFile": str(bad_py)}},
+        }
+        bad_proc = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT)],
+            input=json.dumps(bad_payload),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(bad_proc.returncode, 2)
+        self.assertIn("CANON-", bad_proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

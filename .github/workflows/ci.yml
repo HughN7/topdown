@@ -1,0 +1,42 @@
+name: Topdown CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Topdown engine and TypeScript AST compiler
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          npm install --no-save typescript
+
+      - name: Run Python and TypeScript test suites
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
+          node --test tests/test_check_ts.mjs
+
+      - name: Self-dogfood checkers, engine, fixtures, and examples
+        run: |
+          python enforcement/check_python.py enforcement/check_python.py enforcement/check_rust.py enforcement/run_hook.py examples/verify_examples.py engine/
+          node enforcement/check_ts.mjs --backend=heuristic enforcement/check_ts.mjs .agents/run_hook.mjs
+          node enforcement/check_ts.mjs --backend=ast enforcement/check_ts.mjs .agents/run_hook.mjs
+          python -m engine.cli enforcement/ engine/ .agents/run_hook.mjs examples/verify_examples.py examples/fixtures/python_after.py examples/fixtures/ts_after.ts examples/fixtures/rust_after.rs tests/positive_witness/ tests/checkpoint_evals/cp1_base.py tests/checkpoint_evals/cp2_clean.py tests/checkpoint_evals/cp3_clean.py
+          python examples/verify_examples.py

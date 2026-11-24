@@ -1,0 +1,64 @@
+name: Topdown Escape Hatch Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  check-topdown-overrides:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Flag newly added topdown-ignore overrides
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          DIFF_OUTPUT=$(git diff --unified=0 "origin/${BASE_REF}...HEAD" -- \
+            ':!.github/workflows/**' ':!enforcement/**')
+          MATCHES=$(printf '%s\n' "$DIFF_OUTPUT" | grep -E '^\+([^+].*)?topdown-ignore' || true)
+
+          if [ -z "$MATCHES" ]; then
+            echo "No new topdown-ignore overrides detected."
+            exit 0
+          fi
+
+          echo "Detected newly added topdown-ignore overrides:"
+          printf '%s\n' "$MATCHES"
+
+          if printf ',%s,\n' "$PR_LABELS" | grep -qF ",topdown-override-approved,"; then
+            echo "Human sign-off label 'topdown-override-approved' is present."
+            exit 0
+          fi
+
+          echo "::error::CANON-08: New topdown-ignore override added. A human reviewer must verify the reason=\"...\" and add the 'topdown-override-approved' label."
+          exit 1
+
+      - name: Gate edits to Topdown rules and config
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          CHANGED_RULES=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep -E '^(topdown\.toml|.*/topdown\.toml|AGENTS\.md|.*/AGENTS\.md|(core|languages|zones)/.+\.md)$' || true)
+
+          if [ -z "$CHANGED_RULES" ]; then
+            echo "No Topdown rule or config modifications detected."
+            exit 0
+          fi
+
+          echo "Detected modifications to Topdown rules or config:"
+          printf '%s\n' "$CHANGED_RULES"
+
+          if printf ',%s,\n' "$PR_LABELS" | grep -qF ",topdown-override-approved,"; then
+            echo "Human sign-off label 'topdown-override-approved' is present."
+            exit 0
+          fi
+
+          echo "::error::CANON-08: Modifications to Topdown rules or config require the 'topdown-override-approved' label from a human reviewer."
+          exit 1
