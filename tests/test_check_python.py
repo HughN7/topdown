@@ -653,6 +653,430 @@ class TestCheckPython(unittest.TestCase):
         )
         self.assertEqual(conflict_proc.returncode, 2)
 
+    def test_overload_stubs_excluded_and_headers_absorbed(self) -> None:
+        import check_python
+
+        overloaded = (
+            "import typing\n"
+            "from typing import overload\n\n"
+            "# [L0] Orchestrator\n"
+            "def run_pipeline(raw_value: str) -> str:\n"
+            "    return parse_value(raw_value)\n\n"
+            "# [L3] Leaf parser\n"
+            '# topdown-ignore(CANON-03, reason="legacy overloaded positional signature")\n'
+            "@overload\n"
+            "def parse_value(val: int, p2: int, p3: int, x: int) -> int: ...\n"
+            "@typing.overload\n"
+            "def parse_value(val: str, p2: int, p3: int, x: int) -> str: ...\n"
+            "def parse_value(val: int | str, p2: int = 0, p3: int = 0, extra: int = 0) -> int | str:\n"
+            "    return val\n\n"
+            "class Formatter:\n"
+            '    # topdown-ignore(CANON-03, reason="legacy method overload")\n'
+            "    @overload\n"
+            "    def format_cell(self, raw: int, p2: int, p3: int, p4: int) -> str: ...\n"
+            "    @typing.overload\n"
+            "    def format_cell(self, raw: str, p2: int, p3: int, p4: int) -> str: ...\n"
+            "    def format_cell(self, raw: int | str, p2: int = 0, p3: int = 0, p4: int = 0) -> str:\n"
+            "        return str(raw)\n"
+        )
+        self.assertEqual(check_python.check_source(overloaded, "ov.py"), [])
+        outline = check_python.build_file_outline(overloaded, "ov.py")
+        self.assertEqual([entry["name"] for entry in outline], ["run_pipeline", "parse_value"])
+        self.assertEqual(outline[1]["declared_tier"], "L3")
+
+        conflicting_tags = (
+            "from typing import overload\n\n"
+            "# [L3] Stub header tag\n"
+            "@overload\n"
+            "def parse_value(val: int) -> int: ...\n"
+            "# [L2] Conflicting impl tag\n"
+            "def parse_value(val: int | str) -> int | str:\n"
+            "    return val\n"
+        )
+        self.assertIn("CANON-01", [v.rule for v in check_python.check_source(conflicting_tags, "ov_dup.py")])
+
+        non_contiguous = (
+            "from typing import overload\n\n"
+            "# [L3] Interrupted header\n"
+            "@overload\n"
+            "def parse_value(val: int) -> int: ...\n\n"
+            "SENTINEL = 1\n\n"
+            "def parse_value(val: int | str) -> int | str:\n"
+            "    return val\n"
+        )
+        nc_outline = check_python.build_file_outline(non_contiguous, "ov_nc.py")
+        self.assertIsNone(nc_outline[0]["declared_tier"])
+
+        fix_with_overload = (
+            "from typing import overload\n\n"
+            "@overload\n"
+            "def parse_value(val: int) -> int: ...\n\n"
+            "def parse_value(val: int | str) -> int | str:\n"
+            "    return val\n\n"
+            "def entry(raw: str) -> int | str:\n"
+            "    return parse_value(raw)\n"
+        )
+        fixed, refusal = check_python.fix_source(fix_with_overload)
+        self.assertIsNotNone(refusal)
+        self.assertEqual(fixed, fix_with_overload)
+
+    def test_duplicate_top_level_names_isolated_and_fix_bails(self) -> None:
+        import check_python
+
+        dup_source = (
+            "# [L0] Entrypoint\n"
+            "def run_job(amount_cents: int) -> int:\n"
+            "    return render_value(amount_cents)\n\n"
+            "# [L1] First variant\n"
+            "def render_value(amount_cents: int) -> int:\n"
+            "    return double_amount(amount_cents)\n\n"
+            "# [L3] Second variant\n"
+            "def render_value(amount_cents: int) -> int:\n"
+            "    return amount_cents + 1\n\n"
+            "# [L3] Leaf\n"
+            "def double_amount(amount_cents: int) -> int:\n"
+            "    return amount_cents * 2\n"
+        )
+        self.assertEqual(check_python.check_source(dup_source, "dup_names.py"), [])
+        outline = check_python.build_file_outline(dup_source, "dup_names.py")
+        self.assertEqual(len(outline), 4)
+        self.assertEqual(outline[0]["callees"], ["render_value"])
+        self.assertEqual(outline[1]["declared_tier"], "L1")
+        self.assertEqual(outline[1]["callers"], ["run_job"])
+        self.assertEqual(outline[1]["callees"], ["double_amount"])
+        self.assertEqual(outline[2]["declared_tier"], "L3")
+        self.assertEqual(outline[2]["callers"], ["run_job"])
+        self.assertEqual(outline[2]["callees"], [])
+        self.assertEqual(outline[3]["callers"], ["render_value"])
+
+        dup_bad_ancestor = (
+            "# [L2] First dup\n"
+            "def dup_step(count: int) -> int:\n"
+            "    return bad_leaf(count)\n\n"
+            "# [L0] Second dup\n"
+            "def dup_step(count: int) -> int:\n"
+            "    return count\n\n"
+            "# [L2] Too shallow under [L2] dup_step\n"
+            "def bad_leaf(count: int) -> int:\n"
+            "    return count + 1\n"
+        )
+        bad_msgs = [v.message for v in check_python.check_source(dup_bad_ancestor, "dup_anc.py") if v.rule == "CANON-01"]
+        self.assertTrue(any("below 'dup_step' ([L2])" in msg for msg in bad_msgs), msg=bad_msgs)
+
+        dup_fix_source = (
+            "def dup_step(count: int) -> int:\n"
+            "    return count + 1\n\n"
+            "def dup_step(count: int) -> int:\n"
+            "    return count + 2\n"
+        )
+        fixed, refusal = check_python.fix_source(dup_fix_source)
+        self.assertIsNotNone(refusal)
+        self.assertEqual(fixed, dup_fix_source)
+
+    def test_decorator_calls_excluded_from_local_calls(self) -> None:
+        import check_python
+
+        source = (
+            "def make_decorator(config: dict[str, str]):\n"
+            "    return lambda fn: fn\n\n"
+            "def build_config() -> dict[str, str]:\n"
+            '    return {"mode": "strict"}\n\n'
+            "def make_type() -> type[str]:\n"
+            "    return str\n\n"
+            "# [L0] Orchestrator\n"
+            "@make_decorator(build_config())\n"
+            "def run_handler(\n"
+            "    raw_text: make_type(),\n"
+            "    suffix: str = default_suffix(),\n"
+            "    *,\n"
+            "    prefix: str = default_prefix(),\n"
+            ") -> make_type():\n"
+            "    return prefix + finish_task(raw_text) + suffix\n\n"
+            "# [L3] Leaf\n"
+            "@make_decorator(build_config())\n"
+            "def finish_task(raw_text: make_type()) -> make_type():\n"
+            "    return raw_text.strip()\n\n"
+            "# [L3] Default suffix\n"
+            "def default_suffix() -> str:\n"
+            '    return "!"\n\n'
+            "# [L3] Default prefix\n"
+            "def default_prefix() -> str:\n"
+            '    return ">"\n'
+        )
+        self.assertEqual(check_python.check_source(source, "dec_calls.py"), [])
+        outline = check_python.build_file_outline(source, "dec_calls.py")
+        handler_row = next(row for row in outline if row["name"] == "run_handler")
+        finish_row = next(row for row in outline if row["name"] == "finish_task")
+        self.assertEqual(handler_row["callees"], ["default_prefix", "default_suffix", "finish_task"])
+        self.assertEqual(finish_row["callees"], [])
+
+    def test_tier_tag_no_double_diagnostic_and_no_l4_suggestion(self) -> None:
+        import check_python
+
+        l1_calling_l0 = (
+            "# [L1] Pure Workflow\n"
+            "def workflow(count: int) -> int:\n"
+            "    return leaf(count)\n\n"
+            "# [L0] Invalid L0 below L1\n"
+            "def leaf(count: int) -> int:\n"
+            "    return count + 1\n"
+        )
+        l1_l0_viols = [v for v in check_python.check_source(l1_calling_l0, "l1_l0.py") if v.rule == "CANON-01"]
+        self.assertEqual(len(l1_l0_viols), 1)
+        self.assertEqual(l1_l0_viols[0].line, 6)
+
+        l2_to_l2_chain = (
+            "# [L2] Too deep start\n"
+            "def mid_step(count: int) -> int:\n"
+            "    return sub_step(count)\n\n"
+            "# [L2] Intermediate\n"
+            "def sub_step(count: int) -> int:\n"
+            "    return inner_leaf(count)\n\n"
+            "# [L2] Callee below [L2] at dist 2\n"
+            "def inner_leaf(count: int) -> int:\n"
+            "    return count + 1\n"
+        )
+        chain_viols = [v for v in check_python.check_source(l2_to_l2_chain, "no_l4.py") if v.rule == "CANON-01"]
+        self.assertTrue(chain_viols)
+        for viol in chain_viols:
+            self.assertNotIn("L4", viol.message)
+        leaf_msgs = [v.message for v in chain_viols if v.line == 10]
+        self.assertEqual(len(leaf_msgs), 1)
+        self.assertIn("mid_step", leaf_msgs[0])
+        self.assertIn("[L2]", leaf_msgs[0])
+
+    def test_canon03_non_literal_self_lifecycle_assignments(self) -> None:
+        import check_python
+
+        non_literal_bad = (
+            "class SyncWorker:\n"
+            "    def __init__(self, loading: bool, err: str) -> None:\n"
+            "        self.is_loading = loading\n"
+            "        self.has_error = bool(err)\n"
+        )
+        was_prefix_bad = (
+            "class RetryWorker:\n"
+            "    def __init__(self, prev_retry: bool, done_flag: bool) -> None:\n"
+            "        self.was_retrying = prev_retry\n"
+            "        self.is_loaded = bool(done_flag)\n"
+        )
+        int_literal_ok = (
+            "class NumericFlags:\n"
+            "    def __init__(self) -> None:\n"
+            "        self.is_loading = 1\n"
+            "        self.is_error = 0\n"
+        )
+        bare_non_literal_ok = (
+            "class QueueMetrics:\n"
+            "    def __init__(self, count: int, items: list[str]) -> None:\n"
+            "        self.loading = count\n"
+            "        self.pending = len(items)\n"
+        )
+        self.assertIn("CANON-03", [v.rule for v in check_python.check_source(non_literal_bad, "nl1.py")])
+        self.assertIn("CANON-03", [v.rule for v in check_python.check_source(was_prefix_bad, "nl2.py")])
+        self.assertEqual(check_python.check_source(int_literal_ok, "nl3.py"), [])
+        self.assertEqual(check_python.check_source(bare_non_literal_ok, "nl4.py"), [])
+
+    def test_llm08_duplicate_leaf_detection_and_exemptions(self) -> None:
+        import check_python
+
+        renamed_dups = (
+            "def normalize_alpha(raw_text: str, *, scale: int = 2) -> list[str]:\n"
+            '    """First doc."""\n'
+            "    cleaned = raw_text.strip()\n"
+            "    tokens = [part.lower() for part in cleaned.split(',') if part]\n"
+            "    try:\n"
+            "        ordered = sorted(tokens, key=lambda entry: (len(entry), entry))\n"
+            "    except ValueError as err:\n"
+            "        return [str(err)]\n"
+            "    return [f'{token}:{scale}' for token in ordered]\n\n"
+            "def normalize_beta(input_str: str, *, factor: int = 2) -> list[str]:\n"
+            '    """Different doc."""\n'
+            "    trimmed = input_str.strip()\n"
+            "    chunks = [chunk.lower() for chunk in trimmed.split(',') if chunk]\n"
+            "    try:\n"
+            "        ranked = sorted(chunks, key=lambda row: (len(row), row))\n"
+            "    except ValueError as exc:\n"
+            "        return [str(exc)]\n"
+            "    return [f'{word}:{factor}' for word in ranked]\n"
+        )
+        viols = [v for v in check_python.check_source(renamed_dups, "dups.py") if v.rule == "LLM-08"]
+        self.assertEqual(len(viols), 1)
+        self.assertEqual(viols[0].line, 11)
+        self.assertEqual(
+            viols[0].message,
+            "Function 'normalize_beta' duplicates leaf helper 'normalize_alpha' (line 1); reuse the existing helper instead of adding a duplicate.",
+        )
+
+        suppressed = renamed_dups.replace(
+            "def normalize_beta",
+            '# topdown-ignore(LLM-08, reason="distinct domain concept")\ndef normalize_beta',
+        )
+        self.assertEqual([v for v in check_python.check_source(suppressed, "supp.py") if v.rule == "LLM-08"], [])
+
+        short_with_doc = (
+            "def short_one(raw_text: str) -> str:\n"
+            '    """Long\n    multi-line\n    docstring."""\n'
+            "    # comment line\n\n"
+            "    step_one = raw_text.strip()\n"
+            "    step_two = step_one.lower()\n"
+            "    step_three = step_two.replace('-', '_')\n"
+            "    step_four = step_three.title()\n"
+            "    return step_four\n\n"
+            "def short_two(input_str: str) -> str:\n"
+            '    """Another\n    multi-line\n    docstring."""\n'
+            "    # comment line\n\n"
+            "    part_one = input_str.strip()\n"
+            "    part_two = part_one.lower()\n"
+            "    part_three = part_two.replace('-', '_')\n"
+            "    part_four = part_three.title()\n"
+            "    return part_four\n"
+        )
+        self.assertEqual(check_python.check_source(short_with_doc, "short.py"), [])
+
+        l0_exempt = (
+            "# [L0] Adapter A\n"
+            "def fetch_alpha(endpoint: str) -> str:\n"
+            "    step_one = endpoint.strip()\n"
+            "    step_two = step_one.lower()\n"
+            "    step_three = step_two.replace(' ', '')\n"
+            "    step_four = step_three.removeprefix('http://')\n"
+            "    step_five = step_four.removesuffix('/')\n"
+            "    return step_five\n\n"
+            "# [L0] Adapter B\n"
+            "def fetch_beta(target_url: str) -> str:\n"
+            "    step_one = target_url.strip()\n"
+            "    step_two = step_one.lower()\n"
+            "    step_three = step_two.replace(' ', '')\n"
+            "    step_four = step_three.removeprefix('http://')\n"
+            "    step_five = step_four.removesuffix('/')\n"
+            "    return step_five\n"
+        )
+        self.assertEqual(check_python.check_source(l0_exempt, "l0_exempt.py"), [])
+
+        untagged_two_tier = (
+            "# [L0] Entry\n"
+            "def run_two_tier(first_text: str, second_text: str) -> tuple[str, str]:\n"
+            "    return clean_alpha(first_text), clean_beta(second_text)\n\n"
+            "def clean_alpha(raw_text: str) -> str:\n"
+            "    step_one = raw_text.strip()\n"
+            "    step_two = step_one.lower()\n"
+            "    step_three = step_two.replace(' ', '_')\n"
+            "    step_four = step_three.removeprefix('pre_')\n"
+            "    step_five = step_four.removesuffix('_post')\n"
+            "    return step_five\n\n"
+            "def clean_beta(other_text: str) -> str:\n"
+            "    step_one = other_text.strip()\n"
+            "    step_two = step_one.lower()\n"
+            "    step_three = step_two.replace(' ', '_')\n"
+            "    step_four = step_three.removeprefix('pre_')\n"
+            "    step_five = step_four.removesuffix('_post')\n"
+            "    return step_five\n"
+        )
+        two_tier_viols = [v for v in check_python.check_source(untagged_two_tier, "two_tier.py") if v.rule == "LLM-08"]
+        self.assertEqual(len(two_tier_viols), 1)
+
+        non_matching_cases = [
+            # swapped params
+            (
+                "def sub_ab(first: int, second: int) -> int:\n"
+                "    val_a = first + 1\n    val_b = second + 2\n    val_c = val_a * 3\n"
+                "    val_d = val_b * 4\n    diff = val_c - val_d\n    return diff\n\n"
+                "def sub_ba(first: int, second: int) -> int:\n"
+                "    val_a = second + 1\n    val_b = first + 2\n    val_c = val_a * 3\n"
+                "    val_d = val_b * 4\n    diff = val_c - val_d\n    return diff\n"
+            ),
+            # = None vs missing default
+            (
+                "def def_none(amount: int | None = None) -> int:\n"
+                "    step_one = amount or 0\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n\n"
+                "def no_def(amount: int | None) -> int:\n"
+                "    step_one = amount or 0\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n"
+            ),
+            # pos vs kw-only
+            (
+                "def pos_args(first: int, second: int) -> int:\n"
+                "    step_one = first + second\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n\n"
+                "def kw_args(first: int, *, second: int) -> int:\n"
+                "    step_one = first + second\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n"
+            ),
+            # def vs async def
+            (
+                "def sync_fn(amount: int) -> int:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "async def async_fn(amount: int) -> int:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n"
+            ),
+            # True vs 1 vs 1.0
+            (
+                "def use_bool(amount: int) -> float:\n"
+                "    step_one = amount + True\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "def use_int(amount: int) -> float:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "def use_float(amount: int) -> float:\n"
+                "    step_one = amount + 1.0\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n"
+            ),
+            # + vs -
+            (
+                "def add_fn(amount: int) -> int:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "def sub_fn(amount: int) -> int:\n"
+                "    step_one = amount - 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n"
+            ),
+        ]
+        for idx, sample in enumerate(non_matching_cases):
+            self.assertEqual(
+                [v for v in check_python.check_source(sample, f"nm_{idx}.py") if v.rule == "LLM-08"],
+                [],
+                msg=f"Unexpected LLM-08 on case {idx}",
+            )
+
+        diff_defaults_and_non_leaf = (
+            "def default_one(amount: int = 1) -> int:\n"
+            "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+            "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+            "def default_two(amount: int = 2) -> int:\n"
+            "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+            "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+            "def non_leaf_a(amount: int) -> int:\n"
+            "    step_one = leaf_op(amount)\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+            "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+            "def non_leaf_b(amount: int) -> int:\n"
+            "    step_one = leaf_op(amount)\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+            "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+            "def leaf_op(amount: int) -> int:\n"
+            "    return amount + 1\n"
+        )
+        self.assertEqual(
+            [v for v in check_python.check_source(diff_defaults_and_non_leaf, "dd.py") if v.rule == "LLM-08"],
+            [],
+        )
+
+        import ast
+        tree = ast.parse(renamed_dups)
+        top_fns = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+        direct_viols = check_python.check_duplicate_leaves(
+            top_fns,
+            renamed_dups.split("\n"),
+            "direct.py",
+            call_graph={(fn.name, fn.lineno): set() for fn in top_fns},
+            declared_tags={(fn.name, fn.lineno): None for fn in top_fns},
+            comment_lines=set(),
+        )
+        self.assertEqual(len(direct_viols), 1)
+        self.assertEqual(direct_viols[0].rule, "LLM-08")
+
 
 if __name__ == "__main__":
     unittest.main()
