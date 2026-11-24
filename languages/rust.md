@@ -10,6 +10,7 @@
 | `CANON-04` | Take `&T` and return owned values; reserve `&mut` for `zones/systems-hotpath.md`. |
 | `CANON-05` | Use `?` early-return propagation and `let ... else`; ban nested `fn` declarations and nested `if/else` value expressions. |
 | `LLM-02` | Ban `.unwrap()`, `.expect()` without invariant proof, and `.unwrap_or_default()` in non-test code (`#[cfg(test)]` exempt). |
+| `LLM-08` | Inspect module layout with `topdown --outline src/` before adding helpers; reuse existing 6+ line `L3` leaf primitives (enforced by `engine/`, skipped by heuristic `check_rust.py`). |
 | `CANON-08` | `// topdown-ignore(LLM-02, reason="...")` on the `fn` line, preceding line, or target line. |
 
 ## 2. Standard Linter Config (`clippy.toml`)
@@ -31,4 +32,4 @@ Lightweight zero-dependency heuristic complement to Clippy (Python 3.12+ stdlib)
 python3 enforcement/check_rust.py src/
 ```
 
-Ignores top-level `#[cfg(test)]` modules; checks `CANON-01` (80-line cap), `CANON-03` (implicit state machines), `CANON-05` (nesting depth, nested `fn`), `LLM-02` (`.unwrap()` / `.unwrap_or_default()`), `LLM-07` (inline `#[cfg(test)]`), and `CANON-08` (`topdown-ignore` reason). For full AST call-order/depth/`[L0..L3]` checks and `--outline`, use the optional `engine/` (`topdown [--outline] src/`). Pair with Clippy for compiler-level checks.
+Ignores top-level `#[cfg(test)]` modules; checks `CANON-01` (80-line cap), `CANON-03` (implicit state machines), `CANON-05` (nesting depth, nested `fn`), `LLM-02` (`.unwrap()` / `.unwrap_or_default()`), `LLM-07` (inline `#[cfg(test)]`), and `CANON-08` (`topdown-ignore` reason). For full AST call-order/depth/`[L0..L3]` checks, `LLM-08` duplicate-leaf detection, and pre-edit `--outline` X-Ray (heuristic `check_rust.py` and `run_hook.py` omit `--outline` on `.rs`), use the optional `engine/` (`topdown [--outline] src/`). Pair with Clippy for compiler-level checks.

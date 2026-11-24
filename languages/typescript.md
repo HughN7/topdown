@@ -9,7 +9,8 @@
 | `CANON-03` / `LLM-04` | Ban `any`, untyped `Record<string, unknown>`, and parallel lifecycle booleans (`isLoading` + `isError`) across internal boundaries; use `readonly` interfaces, discriminated unions (`{ status: "loading" } \| { status: "error"; message: string }`), and destructured options objects for 4–6 params. |
 | `CANON-04` | Mark fields `readonly` / `readonly T[]`; return new arrays/objects instead of mutating arguments. |
 | `CANON-05` | Early returns over nested `if`; ban nested `function` declarations and nested ternaries (`no-nested-ternary`). Single-line `.map()` / `.filter()` callbacks are allowed. |
-| `LLM-02` / `LLM-06` / `LLM-07` | Ban empty `catch {}` blocks, unused exports (`npx knip`), and `process.env.NODE_ENV === "test"` branching in production code. |
+| `LLM-02` / `LLM-06` / `LLM-07` | Ban empty `catch {}` blocks (prefer typed union/result returns in `L1–L3`), unused exports (`npx knip`), and `process.env.NODE_ENV === "test"` branching in production code. |
+| `LLM-08` | Inspect module layout with `--outline` before adding helpers; reuse existing 6+ line `L3` leaf primitives rather than adding duplicates. |
 | `CANON-08` | `// topdown-ignore(CANON-05, reason="...")` on the function line, preceding line, or target line. |
 
 ## 2. Standard Linter Config
@@ -43,4 +44,4 @@ export default [{ rules: {
 node enforcement/check_ts.mjs [--backend=auto|ast|heuristic] [--fix] [--dry-run] [--outline] [--json] src/
 ```
 
-Uses optional `typescript` AST (`ts.createSourceFile`) when installed for full parity + `[L0]..[L3]` tier tag verification + `--outline` X-Ray + safe-subset `--fix` on hoisted `function` declarations; falls back to zero-dep heuristics otherwise.
+Uses optional `typescript` AST (`ts.createSourceFile`) when installed for full parity + `[L0]..[L3]` tier tag verification + `LLM-08` duplicate-leaf detection + `--outline` pre-edit X-Ray (auto-appended by `run_hook.py` on `CANON-01`/`LLM-08` failures) + safe-subset `--fix` on hoisted `function` declarations; falls back to zero-dep heuristics otherwise.

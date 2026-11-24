@@ -21,20 +21,21 @@ Every file reads top-down like a technical memo, separates I/O from pure busines
 
 ---
 
-## Part 2: Field-Observed LLM Code Tells (`LLM-01` – `LLM-07`)
+## Part 2: Field-Observed LLM Code Tells (`LLM-01` – `LLM-08`)
 
 | ID | Anti-Pattern | Rule |
 |---|---|---|
 | **`LLM-01`** | **No Hollow Trampoline Wrappers** | Ban pass-through functions where `fn_a(x)` forwards `x` unchanged to `fn_b(x)` (Shape-Change Rule). A deeper call is valid only if it transforms types, fans out across helpers, or crosses an I/O boundary. |
-| **`LLM-02`** | **No Defensive Error Swallowing** | Never wrap internal pure logic in broad catch-all blocks or silent fallback chains that hide bugs. |
+| **`LLM-02`** | **No Defensive Error Swallowing** | Never wrap internal pure logic in broad catch-all blocks or silent fallback chains that hide bugs; prefer typed return values or result objects over control-flow exceptions in pure `L1–L3` logic. |
 | **`LLM-03`** | **No Vague or Single-Char Names** | Ban vague container nouns (`data`, `info`, `item`, `temp`, `result`, `handler`) and single-character parameter/variable names (`i`, `n`, `x`, `v`) outside `_` for ignored values (e.g., `for index, name in enumerate(names)`, not `for i, n in ...`). |
 | **`LLM-04`** | **No Single-Use DTO Bloat** | Use the language's idiomatic named/structured parameter mechanism instead of inventing one-off parameter wrapper types. |
 | **`LLM-05`** | **No Linter-Gaming Compression** | Never strip blank lines, pack multiple statements onto one line, or abbreviate identifiers to pass line caps; always format first, measure second. |
 | **`LLM-06`** | **No Dead Code or Unlinked TODOs** | Ban commented-out code, unused exports, and `TODO`/`FIXME` comments without a linked issue or ticket reference. |
 | **`LLM-07`** | **No Test-Runner Branching** | Never branch on test environment flags (`PYTEST_CURRENT_TEST`, `NODE_ENV === "test"`, `unittest` in `sys.modules`) inside production code; inject test behavior via explicit typed parameters at the `L0` I/O shell. |
+| **`LLM-08`** | **No Duplicate Leaf Primitives** | Reuse existing leaf helpers rather than adding structurally duplicate `L3` leaves; inspect module layout with `--outline` before adding new helpers. |
 
 ---
 
 ## Delivery Gate
 
-Before declaring a task complete, format modified files with the language's standard auto-formatter, run the configured language linter and matching `enforcement/` checker (if present), and resolve all violations without adding unapproved `topdown-ignore` overrides.
+Before declaring a task complete, prefer localized surgical edits over full-file rewrites on existing production modules, format modified files with the language's standard auto-formatter, run the configured language linter and matching `enforcement/` checker (if present), resolve all violations without unapproved `topdown-ignore` overrides, add pure unit tests for new or modified `L1–L3` logic, and run an executable verification check when touching `L0` orchestrators.

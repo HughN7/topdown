@@ -9,8 +9,9 @@
 | `CANON-03` / `LLM-04` | Use `@dataclass(frozen=True)` or `TypedDict` at boundaries—never raw `dict[str, Any]`. Model lifecycle states with explicit `Enum` or `Literal["idle", "loading", "ready", "error"]` unions, never parallel `is_loading`/`is_error` booleans. Use `*` keyword-only arguments for 4–6 params instead of one-off DTOs. |
 | `CANON-04` | Prefer `@dataclass(frozen=True)`, `tuple`, and `frozenset` over mutating caller lists/dicts. |
 | `CANON-05` | Use guard clauses and exhaustive `match` statements; ban nested `def` / `async def` and nested conditional expressions (`a if x else (b if y else c)`). |
-| `LLM-02` | Ban bare `except:` and broad `except Exception: pass` / `return None` inside pure logic. |
+| `LLM-02` | Ban bare `except:` and broad `except Exception: pass` / `return None` inside pure logic; prefer typed returns / result objects over control-flow exceptions in `L1–L3`. |
 | `LLM-06` | Catch dead code with `vulture src/ --min-confidence 80`. |
+| `LLM-08` | Inspect module layout with `--outline` before adding helpers; reuse existing 6+ line `L3` leaf primitives rather than adding duplicates. |
 | `CANON-08` | `# topdown-ignore(CANON-05, reason="...")` on the `def` line, preceding line, or target line. |
 
 ## 2. Standard Linter Config (`pyproject.toml` — Ruff)
@@ -40,4 +41,4 @@ Reference AST checker (zero dependencies, Python 3.12+ stdlib):
 python3 enforcement/check_python.py [--fix] [--dry-run] [--outline] [--json] src/
 ```
 
-Checks `CANON-01` (topological order, L0–L3 depth, `[L0]..[L3]` tier tag verification, 80-line cap, safe-subset `--fix`, `--outline` call-graph X-Ray), `CANON-03` (positional/total args, implicit state machines), `CANON-05` (nesting depth, inner `def`, nested ternary), `LLM-02` (error swallowing), `LLM-03` (vague/single-char names), `LLM-05` (anti-gaming names), `LLM-07` (test-runner branching), and `CANON-08` (`topdown-ignore` reason).
+Checks `CANON-01` (topological order, L0–L3 depth, `[L0]..[L3]` tier tag verification, 80-line cap, safe-subset `--fix`, `--outline` pre-edit call-graph X-Ray), `CANON-03` (positional/total args, implicit state machines), `CANON-05` (nesting depth, inner `def`, nested ternary), `LLM-02` (error swallowing), `LLM-03` (vague/single-char names), `LLM-05` (anti-gaming names), `LLM-07` (test-runner branching), `LLM-08` (duplicate leaf primitives), and `CANON-08` (`topdown-ignore` reason). `enforcement/run_hook.py` automatically appends a capped `--outline` summary on `CANON-01` or `LLM-08` failures.

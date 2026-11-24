@@ -11,6 +11,7 @@
 | `CANON-05` | Use `guard ... else { return }` early exits and exhaustive `switch`; ban nested `func` declarations and nested ternaries. *(For SwiftUI `View` closures, apply `zones/frontend-ui.md` to `Views/` while keeping `Domain/` strict.)* |
 | `LLM-02` | Ban force-unwrapping (`!`), `try!`, and silent `try?` / `catch {}` error swallowing in non-test code. |
 | `LLM-06` | Catch unused declarations with `periphery scan`. |
+| `LLM-08` | Inspect module layout with `topdown --outline src/` before adding helpers; reuse existing 6+ line `L3` leaf primitives (enforced by `engine/`). |
 | `CANON-08` | `// topdown-ignore(CANON-05, reason="...")` on the `func` line, preceding line, or target line. |
 
 ## 2. Standard Linter Config (`.swiftlint.yml` — SwiftLint)
@@ -41,4 +42,4 @@ force_cast: error
 
 ## 3. Structural Checker
 
-Pair `swiftlint --strict`, `swift-format`, and [`enforcement/ci_escape_hatch.yml`](../enforcement/ci_escape_hatch.yml). For full AST checks (`CANON-01` order/depth/lines/`[L0..L3]` tier tags, `CANON-05` nesting, `LLM-05`, `CANON-08`) and `--outline`, run the optional universal tree-sitter engine (`topdown [--outline] src/`).
+Pair `swiftlint --strict`, `swift-format`, and [`enforcement/ci_escape_hatch.yml`](../enforcement/ci_escape_hatch.yml). For full AST checks (`CANON-01` order/depth/lines/`[L0..L3]` tier tags, `CANON-05` nesting, `LLM-05`, `LLM-08` duplicate leaf primitives, `CANON-08`) and pre-edit `--outline` X-Ray (auto-appended by `run_hook.py` on `CANON-01`/`LLM-08` failures), run the optional universal tree-sitter engine (`topdown [--outline] src/`).

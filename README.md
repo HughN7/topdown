@@ -19,9 +19,9 @@ Precedence: **`core/base.md` → `languages/<lang>.md` → `zones/<zone>.md` →
 
 | Layer | Path | Purpose |
 |---|---|---|
-| **Core** | [`core/base.md`](core/base.md) | 15 language-agnostic rules (`CANON-01..08`, `LLM-01..07`): top-down `L0→L3` order, I/O shell / pure core, 60–80 line cap, max nesting depth 2, explicit types, no test-runner branching, human-gated overrides. |
+| **Core** | [`core/base.md`](core/base.md) | 16 language-agnostic rules (`CANON-01..08`, `LLM-01..08`): top-down `L0→L3` order, I/O shell / pure core, 60–80 line cap, max nesting depth 2, explicit types, no duplicate leaf primitives, no test-runner branching, human-gated overrides. |
 | **Languages** | [`languages/`](languages/) | Idiom mappings + runnable linter configs (see support matrix below). |
-| **Zones** | [`zones/`](zones/) | Optional directory-scoped rule overrides—either **relaxing** rules where framework/systems mechanics require it ([`frontend-ui.md`](zones/frontend-ui.md), [`svelte-state.md`](zones/svelte-state.md), [`systems-hotpath.md`](zones/systems-hotpath.md)) or **tightening** them for high-stakes paths ([`security-critical.md`](zones/security-critical.md)). |
+| **Zones** | [`zones/`](zones/) | Optional directory-scoped rule overrides—either **relaxing** rules where framework/systems mechanics require it ([`frontend-ui.md`](zones/frontend-ui.md), [`svelte-state.md`](zones/svelte-state.md), [`systems-hotpath.md`](zones/systems-hotpath.md)), **tightening** them for high-stakes paths ([`security-critical.md`](zones/security-critical.md)), or isolating throwaway spikes ([`prototype.md`](zones/prototype.md)). |
 | **Enforcement** | [`enforcement/`](enforcement/) | Zero-dependency checkers (`check_python.py`, `check_ts.mjs`, `check_rust.py`), `run_hook.py` (`PostToolUse` dispatcher), and PR escape-hatch workflow. |
 
 ### Language Support Matrix
@@ -52,7 +52,7 @@ topdown --outline src/                # 1-second architectural X-Ray ([L0..L3] t
 topdown --config topdown.toml src/    # Adds opt-in cross-file CANON-02 I/O boundary checks
 ```
 
-Topdown **never assumes directory names** (`core/`, `domain/`, etc.) on external repos. Cross-file `CANON-02` checks run *only* when you explicitly declare `pure_dirs` in `topdown.toml`:
+Inspect module layout with `--outline` (`topdown --outline`, `check_python.py --outline`, or `check_ts.mjs --outline`) before adding new helpers to avoid `LLM-08` duplicate leaves. Topdown **never assumes directory names** (`core/`, `domain/`, etc.) on external repos. Cross-file `CANON-02` checks run *only* when you explicitly declare `pure_dirs` in `topdown.toml`:
 
 ```toml
 exclude_dirs = [".svelte-kit", "migrations"]   # optional: skip generated code
@@ -65,7 +65,7 @@ extra_io_imports = ["stripe"]     # optional: project-specific I/O packages
 
 ### Optional: Auto-Check on Every Edit (`PostToolUse` Hook)
 
-Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Antigravity so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations):
+Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Antigravity so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations, and automatically appends a capped `--outline` summary on `CANON-01` or `LLM-08` failures for AST-backed checkers):
 
 ```json
 {
