@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -298,6 +299,78 @@ class TestRunHook(unittest.TestCase):
             rendered = fake_stderr.getvalue()
             self.assertIn("sample.py:1: [CANON-01] order violation\nchecker note", rendered)
             self.assertNotIn("Module outline:", rendered)
+
+    def test_config_lock_disabled_by_default(self) -> None:
+        clean_env = dict(os.environ)
+        clean_env.pop("TOPDOWN_LOCK_CONFIGS", None)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            toml_file = root / "topdown.toml"
+            toml_file.write_text("[boundaries]\npure_dirs = []\n", encoding="utf-8")
+            zone_file = root / "zones" / "prototype.md"
+            zone_file.parent.mkdir(parents=True)
+            zone_file.write_text("# Prototype\n", encoding="utf-8")
+            for target_file in (toml_file, zone_file, ROOT_DIR / "zones" / "prototype.md"):
+                proc = subprocess.run(
+                    [sys.executable, str(HOOK_SCRIPT)],
+                    input=json.dumps({"tool_input": {"file_path": str(target_file)}}),
+                    env=clean_env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+
+    def test_config_lock_blocks_rule_files_when_enabled(self) -> None:
+        self.assertTrue(run_hook.is_locked_config_path(Path("topdown.toml")))
+        self.assertTrue(run_hook.is_locked_config_path(Path("AGENTS.md")))
+        self.assertTrue(run_hook.is_locked_config_path(Path("languages/python.md")))
+        self.assertTrue(run_hook.is_locked_config_path(Path("zones/prototype.md")))
+        self.assertFalse(run_hook.is_locked_config_path(Path("README.md")))
+        self.assertFalse(run_hook.is_locked_config_path(Path("core/helper.py")))
+
+        locked_env = {**os.environ, "TOPDOWN_LOCK_CONFIGS": "1"}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            toml_file = root / "topdown.toml"
+            agents_file = root / "AGENTS.md"
+            core_file = root / "core" / "base.md"
+            toml_file.write_text("", encoding="utf-8")
+            agents_file.write_text("", encoding="utf-8")
+            core_file.parent.mkdir(parents=True)
+            core_file.write_text("", encoding="utf-8")
+            for target_file in (toml_file, agents_file, core_file, ROOT_DIR / "core" / "base.md"):
+                proc = subprocess.run(
+                    [sys.executable, str(HOOK_SCRIPT)],
+                    input=json.dumps({"tool_input": {"file_path": str(target_file)}}),
+                    env=locked_env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(proc.returncode, 2, msg=f"Expected exit 2 for {target_file}")
+                self.assertIn("Topdown config lock (TOPDOWN_LOCK_CONFIGS=1):", proc.stderr)
+                self.assertIn("ask a human to approve rule changes.", proc.stderr)
+
+        clean_py = ROOT_DIR / "examples" / "fixtures" / "python_after.py"
+        clean_proc = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT)],
+            input=json.dumps({"tool_input": {"file_path": str(clean_py)}}),
+            env=locked_env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(clean_proc.returncode, 0, msg=clean_proc.stderr)
+
+        bad_py = ROOT_DIR / "examples" / "fixtures" / "python_before.py"
+        bad_proc = subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT)],
+            input=json.dumps({"tool_input": {"file_path": str(bad_py)}}),
+            env=locked_env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(bad_proc.returncode, 2)
+        self.assertIn("CANON-", bad_proc.stderr)
+        self.assertNotIn("Topdown config lock", bad_proc.stderr)
 
 
 if __name__ == "__main__":

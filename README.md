@@ -49,6 +49,7 @@ pip install git+https://github.com/HughN7/topdown.git
 
 topdown src/                          # Single-file AST checks across all 5 languages (zero config)
 topdown --outline src/                # 1-second architectural X-Ray ([L0..L3] tiers, line spans, callers/callees)
+topdown --receipt src/                # Deterministic Markdown PR verification receipt (compliance, waivers, boundaries)
 topdown --config topdown.toml src/    # Adds opt-in cross-file CANON-02 I/O boundary checks
 ```
 
@@ -65,7 +66,7 @@ extra_io_imports = ["stripe"]     # optional: project-specific I/O packages
 
 ### Optional: Auto-Check on Every Edit (`PostToolUse` Hook)
 
-Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Antigravity so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations, and automatically appends a capped `--outline` summary on `CANON-01` or `LLM-08` failures for AST-backed checkers):
+Wire [`enforcement/run_hook.py`](enforcement/run_hook.py) into Claude Code / Cursor / Antigravity so every `Edit` or `Write` gets sub-100ms structural feedback (exits `2` with refactor guidance on violations, and automatically appends a capped `--outline` summary on `CANON-01` or `LLM-08` failures for AST-backed checkers). Set `TOPDOWN_LOCK_CONFIGS=1` (opt-in, off by default) to also block edits to `topdown.toml`, `AGENTS.md`, and `core/`, `languages/`, or `zones/` rule files until a human approves changes (`enforcement/ci_escape_hatch.yml` gates the same files in PRs via `topdown-override-approved`):
 
 ```json
 {

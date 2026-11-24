@@ -1,4 +1,4 @@
-name: topdown Escape Hatch Gate
+name: Topdown Escape Hatch Gate
 
 on:
   pull_request:
@@ -37,4 +37,28 @@ jobs:
           fi
 
           echo "::error::CANON-08: New topdown-ignore override added. A human reviewer must verify the reason=\"...\" and add the 'topdown-override-approved' label."
+          exit 1
+
+      - name: Gate edits to Topdown rules and config
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          CHANGED_RULES=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep -E '^(topdown\.toml|.*/topdown\.toml|(core|languages|zones)/.+)$' || true)
+
+          if [ -z "$CHANGED_RULES" ]; then
+            echo "No Topdown rule or config modifications detected."
+            exit 0
+          fi
+
+          echo "Detected modifications to Topdown rules or config:"
+          printf '%s\n' "$CHANGED_RULES"
+
+          if printf ',%s,\n' "$PR_LABELS" | grep -qF ",topdown-override-approved,"; then
+            echo "Human sign-off label 'topdown-override-approved' is present."
+            exit 0
+          fi
+
+          echo "::error::CANON-08: Modifications to Topdown rules or config require the 'topdown-override-approved' label from a human reviewer."
           exit 1

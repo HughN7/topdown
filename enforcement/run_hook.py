@@ -20,12 +20,25 @@ TS_EXTENSIONS = frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"})
 ENGINE_EXTENSIONS = frozenset({".swift", ".go"})
 OUTLINE_SCRIPTS = frozenset({"check_python.py", "check_ts.mjs"})
 MAX_OUTLINE_LINES = 25
+LOCKED_CONFIG_FILENAMES = frozenset({"topdown.toml", "AGENTS.md"})
+LOCKED_RULE_DIRS = frozenset({"core", "languages", "zones"})
+LOCK_ENABLED_VALUES = frozenset({"1", "true", "yes"})
 
 
 def main() -> int:
     raw_input = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     target_path = extract_file_path(raw_input)
-    if target_path is None or not target_path.is_file() or target_path.name.endswith(".d.ts"):
+    if target_path is None:
+        return 0
+    is_lock_enabled = os.environ.get("TOPDOWN_LOCK_CONFIGS", "").strip().lower() in LOCK_ENABLED_VALUES
+    if is_lock_enabled and is_locked_config_path(target_path):
+        print(
+            f"Topdown config lock (TOPDOWN_LOCK_CONFIGS=1): Refusing edit to '{target_path}'. "
+            "Refactor source code instead of weakening rules/config; ask a human to approve rule changes.",
+            file=sys.stderr,
+        )
+        return 2
+    if not target_path.is_file() or target_path.name.endswith(".d.ts"):
         return 0
     command = build_checker_command(target_path)
     if not command:
@@ -142,6 +155,14 @@ def fetch_module_outline(command: tuple[str, ...], env: dict[str, str]) -> str:
     if len(lines) > MAX_OUTLINE_LINES:
         lines = [*lines[:MAX_OUTLINE_LINES], "... (truncated)"]
     return "\n".join(lines)
+
+
+def is_locked_config_path(target_path: Path) -> bool:
+    if target_path.name in LOCKED_CONFIG_FILENAMES:
+        return True
+    if target_path.suffix.lower() != ".md":
+        return False
+    return any(part in LOCKED_RULE_DIRS for part in target_path.parts)
 
 
 if __name__ == "__main__":

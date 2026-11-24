@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from engine.specs import spec_for_path
+
+WAIVER_SCAN_PATTERN = re.compile(
+    r"""(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\\n])*`)|((?:#|//)[^\n]*)"""
+)
+WAIVER_MARKER_PATTERN = re.compile(r"\btopdown-ignore\b")
 
 SKIP_DIRS = frozenset({
     ".git",
@@ -30,12 +36,13 @@ class EngineOptions:
     as_json: bool
     config_path: Path | None
     outline: bool = False
+    receipt: bool = False
 
 
 def main() -> int:
     options = parse_cli_args(sys.argv[1:])
     if options is None:
-        print("Usage: topdown [--json] [--outline] [--config topdown.toml] <path> [...]", file=sys.stderr)
+        print("Usage: topdown [--json] [--outline] [--receipt] [--config topdown.toml] <path> [...]", file=sys.stderr)
         return 2
     try:
         from engine.analyzer import Violation, analyze_source, outline_source
@@ -64,19 +71,30 @@ def main() -> int:
     if options.outline:
         return run_engine_outline(target_files, outline_source, as_json=options.as_json)
     all_violations: list[Violation] = []
+    waiver_count = 0
     for file_path in target_files:
         try:
             source_text = file_path.read_text(encoding="utf-8")
             file_violations = analyze_source(source_text, str(file_path))
             boundary_violations = check_file_boundaries(source_text, file_path, boundary_cfg) if boundary_cfg is not None else []
             all_violations.extend(file_violations + boundary_violations)
+            waiver_count += count_waiver_comments(source_text) if options.receipt else 0
         except (OSError, UnicodeDecodeError) as exc:
             print(f"Error reading {file_path}: {exc}", file=sys.stderr)
             return 2
         except Exception as exc:
             print(f"Engine error on {file_path}: {exc}", file=sys.stderr)
             return 2
-    emit_violations(all_violations, as_json=options.as_json)
+    if options.receipt:
+        receipt_stats: dict[str, object] = {
+            "files_checked": len(target_files),
+            "waivers": waiver_count,
+            "boundaries_enabled": boundary_cfg is not None and bool(boundary_cfg.pure_dirs),
+            "pure_dirs_count": len(boundary_cfg.pure_dirs) if boundary_cfg is not None else 0,
+        }
+        print(format_verification_receipt(receipt_stats, all_violations))
+    else:
+        emit_violations(all_violations, as_json=options.as_json)
     return 1 if all_violations else 0
 
 
@@ -133,6 +151,7 @@ def format_engine_outline_text(payload: list[dict[str, object]]) -> str:
 def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
     as_json = False
     outline = False
+    receipt = False
     config_path: Path | None = None
     paths: list[str] = []
     idx = 0
@@ -142,6 +161,8 @@ def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
             as_json = True
         elif token == "--outline":
             outline = True
+        elif token == "--receipt":
+            receipt = True
         elif token == "--config" and idx + 1 < len(raw_args):
             config_path = Path(raw_args[idx + 1])
             idx += 1
@@ -154,7 +175,13 @@ def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
         idx += 1
     if not paths:
         return None
-    return EngineOptions(paths=tuple(paths), as_json=as_json, config_path=config_path, outline=outline)
+    return EngineOptions(
+        paths=tuple(paths),
+        as_json=as_json,
+        config_path=config_path,
+        outline=outline,
+        receipt=receipt,
+    )
 
 
 def collect_supported_files(
@@ -210,6 +237,51 @@ def emit_violations(violations: list[object], *, as_json: bool) -> None:
         return
     for entry in violations:
         print(f"{entry.path}:{entry.line}: [{entry.rule}] {entry.message}")
+
+
+def count_waiver_comments(source_text: str) -> int:
+    waiver_count = 0
+    for line in source_text.splitlines():
+        comments = (match.group(1) for match in WAIVER_SCAN_PATTERN.finditer(line) if match.group(1))
+        if any(WAIVER_MARKER_PATTERN.search(comment) for comment in comments):
+            waiver_count += 1
+    return waiver_count
+
+
+def format_verification_receipt(stats: dict[str, object], violations: list[object]) -> str:
+    raw_files = stats.get("files_checked", 0)
+    files_checked = raw_files if isinstance(raw_files, int) and not isinstance(raw_files, bool) else 0
+    raw_waivers = stats.get("waivers", 0)
+    waivers = raw_waivers if isinstance(raw_waivers, int) and not isinstance(raw_waivers, bool) else 0
+    boundaries_enabled = bool(stats.get("boundaries_enabled", False))
+    raw_pure_dirs = stats.get("pure_dirs_count", 0)
+    pure_dirs_count = raw_pure_dirs if isinstance(raw_pure_dirs, int) and not isinstance(raw_pure_dirs, bool) else 0
+    boundary_violations = [entry for entry in violations if getattr(entry, "rule", "") == "CANON-02"]
+    if boundary_violations:
+        boundary_status = "FAIL"
+        scope = f" across {pure_dirs_count} pure_dirs" if pure_dirs_count > 0 else ""
+        boundary_detail = f"{len(boundary_violations)} CANON-02 violations{scope}"
+    elif boundaries_enabled:
+        boundary_status = "PASS"
+        boundary_detail = f"0 CANON-02 violations across {pure_dirs_count} pure_dirs"
+    else:
+        boundary_status = "Opt-in"
+        boundary_detail = "No pure_dirs configured in topdown.toml"
+    structural_status = "FAIL" if violations else "PASS"
+    lines = [
+        "## Topdown Verification Receipt",
+        "",
+        "| Check | Status | Details |",
+        "|---|---|---|",
+        f"| **Structural Compliance** | {structural_status} | {files_checked} files checked, {len(violations)} violations |",
+        f"| **Override Waivers (`CANON-08`)** | {waivers} waivers | Explicit `topdown-ignore` annotations across checked files |",
+        f"| **Boundary Integrity (`CANON-02`)** | {boundary_status} | {boundary_detail} |",
+    ]
+    if violations:
+        lines.extend(["", "### Violations", ""])
+        for entry in violations:
+            lines.append(f"- {entry.path}:{entry.line}: [{entry.rule}] {entry.message}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

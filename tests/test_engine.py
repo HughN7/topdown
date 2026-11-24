@@ -1191,6 +1191,93 @@ class TestUniversalEngine(unittest.TestCase):
         self.assertEqual(len(direct_viols), 1)
         self.assertEqual(direct_viols[0].rule, "LLM-08")
 
+    def test_cli_receipt_clean_and_failing_output(self) -> None:
+        from engine.cli import count_waiver_comments
+
+        waiver_sample = (
+            '# topdown-ignore(CANON-01, reason="C ABI")\n'
+            'const note = "# topdown-ignore inside string";\n'
+            'pub fn alpha() -> i32 { 1 } // topdown-ignore(CANON-05, reason="inline")\n'
+            'const url = "https://example.com/topdown-ignore";\n'
+        )
+        self.assertEqual(count_waiver_comments(waiver_sample), 2)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            clean_file = root / "clean.py"
+            clean_file.write_text(
+                "def orchestrate(amount_cents: int) -> int:\n"
+                "    return apply_fee(amount_cents)\n\n"
+                "def apply_fee(amount_cents: int) -> int:\n"
+                "    return amount_cents - 50\n",
+                encoding="utf-8",
+            )
+            clean_proc = subprocess.run(
+                [sys.executable, "-m", "engine.cli", "--receipt", str(clean_file)],
+                cwd=str(ROOT_DIR),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(clean_proc.returncode, 0, msg=clean_proc.stderr + clean_proc.stdout)
+            self.assertIn("## Topdown Verification Receipt", clean_proc.stdout)
+            self.assertIn("| **Structural Compliance** | PASS | 1 files checked, 0 violations |", clean_proc.stdout)
+            self.assertIn("| **Override Waivers (`CANON-08`)** | 0 waivers |", clean_proc.stdout)
+            self.assertIn("| **Boundary Integrity (`CANON-02`)** | Opt-in |", clean_proc.stdout)
+            self.assertNotIn("### Violations", clean_proc.stdout)
+
+            failing_file = root / "failing.py"
+            failing_file.write_text(
+                '# topdown-ignore(CANON-05, reason="legacy guard")\n'
+                "def legacy_check(flag_a: bool, flag_b: bool, flag_c: bool) -> int:\n"
+                "    if flag_a:\n"
+                "        if flag_b:\n"
+                "            if flag_c:\n"
+                "                return 1\n"
+                "    return 0\n\n"
+                "def bad_leaf(amount_cents: int) -> int:\n"
+                "    return amount_cents - 50\n\n"
+                "def caller_below(amount_cents: int) -> int:\n"
+                "    return bad_leaf(amount_cents)\n",
+                encoding="utf-8",
+            )
+            fail_proc = subprocess.run(
+                [sys.executable, "-m", "engine.cli", "--receipt", str(failing_file)],
+                cwd=str(ROOT_DIR),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(fail_proc.returncode, 1, msg=fail_proc.stderr + fail_proc.stdout)
+            self.assertIn("## Topdown Verification Receipt", fail_proc.stdout)
+            self.assertIn("| **Structural Compliance** | FAIL | 1 files checked, 1 violations |", fail_proc.stdout)
+            self.assertIn("1 waivers", fail_proc.stdout)
+            self.assertIn("### Violations", fail_proc.stdout)
+            self.assertIn("[CANON-01]", fail_proc.stdout)
+
+        with tempfile.TemporaryDirectory() as bound_dir:
+            bound_root = Path(bound_dir)
+            (bound_root / "topdown.toml").write_text(
+                "[boundaries]\n"
+                'pure_dirs = ["src/domain"]\n'
+                'shell_dirs = ["src/adapters"]\n',
+                encoding="utf-8",
+            )
+            domain_file = bound_root / "src" / "domain" / "pricing.py"
+            domain_file.parent.mkdir(parents=True)
+            domain_file.write_text(
+                "def compute_price(amount_cents: int) -> int:\n"
+                "    return amount_cents - 50\n",
+                encoding="utf-8",
+            )
+            bound_proc = subprocess.run(
+                [sys.executable, "-m", "engine.cli", "--receipt", str(bound_root)],
+                cwd=str(ROOT_DIR),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(bound_proc.returncode, 0, msg=bound_proc.stderr + bound_proc.stdout)
+            self.assertIn("| **Structural Compliance** | PASS | 1 files checked, 0 violations |", bound_proc.stdout)
+            self.assertIn("| **Boundary Integrity (`CANON-02`)** | PASS |", bound_proc.stdout)
+
 
 
 if __name__ == "__main__":
