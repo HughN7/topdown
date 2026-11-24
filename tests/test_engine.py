@@ -1303,6 +1303,62 @@ class TestUniversalEngine(unittest.TestCase):
                 self.assertEqual(conflict_proc.returncode, 2, msg=f"Expected exit 2 for {bad_flags}")
                 self.assertIn("Usage:", conflict_proc.stderr)
 
+    def test_canon03_nested_generic_types_and_wide_tuples_across_languages(self) -> None:
+        from engine.analyzer import analyze_source
+
+        samples = [
+            (
+                "types.py",
+                "from typing import Optional\n\n"
+                "DeepAlias = dict[tuple[tuple[str, int], tuple[str, int]], int]\n\n"
+                "def bad_fn(\n"
+                "    matrix: dict[str, dict[str, list[int]]],\n"
+                ") -> tuple[int, int, int, int]:\n"
+                "    return (1, 2, 3, 4)\n\n"
+                '# topdown-ignore(CANON-03, reason="wire format")\n'
+                "def waived_fn() -> tuple[int, int, int, int]:\n"
+                "    return (1, 2, 3, 4)\n\n"
+                "def clean_fn(items: Optional[dict[str, list[int]]]) -> list[tuple[str, int]]:\n"
+                "    return []\n",
+                2,
+            ),
+            (
+                "types.ts",
+                "type DeepAlias = Record<string, Map<string, Array<number>>>;\n\n"
+                "export function badFn(matrix: Record<string, Map<string, Array<number>>>): [number, number, number, number] {\n"
+                "  return [1, 2, 3, 4];\n"
+                "}\n\n"
+                "export async function cleanFn(items: Record<string, number[]>): Promise<Readonly<Record<string, number[]>>> {\n"
+                "  return items;\n"
+                "}\n",
+                2,
+            ),
+            (
+                "types.rs",
+                "type WideAlias = (i32, i32, i32, i32);\n\n"
+                "pub fn bad_fn(matrix: HashMap<String, Vec<Vec<i32>>>) -> (i32, i32, i32, i32) {\n"
+                "    (1, 2, 3, 4)\n"
+                "}\n\n"
+                "pub fn clean_fn(items: Result<Option<Vec<i32>>, String>) -> Option<Vec<i32>> {\n"
+                "    None\n"
+                "}\n",
+                2,
+            ),
+            (
+                "types.swift",
+                "typealias WideAlias = (Int, Int, Int, Int)\n\n"
+                "func badFn(matrix: Dictionary<String, Array<Array<Int>>>) -> (Int, Int, Int, Int) {\n"
+                "    return (1, 2, 3, 4)\n"
+                "}\n\n"
+                "func cleanFn(items: [String: [Int]]?) -> [Int] {\n"
+                "    return []\n"
+                "}\n",
+                2,
+            ),
+        ]
+        for filename, code, expected_count in samples:
+            canon03 = [v for v in analyze_source(code, filename) if v.rule == "CANON-03"]
+            self.assertEqual(len(canon03), expected_count, msg=f"{filename}: {canon03}")
 
 
 if __name__ == "__main__":

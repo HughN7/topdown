@@ -44,4 +44,4 @@ export default [{ rules: {
 node enforcement/check_ts.mjs [--backend=auto|ast|heuristic] [--fix] [--dry-run] [--outline] [--json] src/
 ```
 
-Uses optional `typescript` AST (`ts.createSourceFile`) when installed for full parity + `[L0]..[L3]` tier tag verification + `LLM-08` duplicate-leaf detection + `--outline` pre-edit X-Ray (auto-appended by `run_hook.py` on `CANON-01`/`LLM-08` failures) + safe-subset `--fix` on hoisted `function` declarations; falls back to zero-dep heuristics otherwise.
+Uses optional `typescript` AST (`ts.createSourceFile`) when installed for full parity + `[L0]..[L3]` tier tag verification + `CANON-03` nested generic/wide-tuple checks + `LLM-08` duplicate-leaf detection + `--outline` pre-edit X-Ray (auto-appended by `run_hook.py` on `CANON-01`/`LLM-08` failures) + safe-subset `--fix` on hoisted `function` declarations; falls back to zero-dep heuristics otherwise.

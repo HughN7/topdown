@@ -42,4 +42,4 @@ force_cast: error
 
 ## 3. Structural Checker
 
-Pair `swiftlint --strict`, `swift-format`, and [`enforcement/ci_escape_hatch.yml`](../enforcement/ci_escape_hatch.yml). For full AST checks (`CANON-01` order/depth/lines/`[L0..L3]` tier tags, `CANON-05` nesting, `LLM-05`, `LLM-08` duplicate leaf primitives, `CANON-08`) and pre-edit `--outline` X-Ray (auto-appended by `run_hook.py` on `CANON-01`/`LLM-08` failures), run the optional universal tree-sitter engine (`topdown [--outline] src/`).
+Pair `swiftlint --strict`, `swift-format`, and [`enforcement/ci_escape_hatch.yml`](../enforcement/ci_escape_hatch.yml). For full AST checks (`CANON-01` order/depth/lines/`[L0..L3]` tier tags, `CANON-03` nested generic/wide-tuple types, `CANON-05` nesting, `LLM-05`, `LLM-08` duplicate leaf primitives, `CANON-08`) and pre-edit `--outline` X-Ray (auto-appended by `run_hook.py` on `CANON-01`/`LLM-08` failures), run the optional universal tree-sitter engine (`topdown [--outline] src/`).

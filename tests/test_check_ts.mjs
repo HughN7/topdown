@@ -1278,3 +1278,46 @@ test("2-checkpoint TypeScript AST evolution detects compounding erosion and pass
   const cp2Outline = mod.buildAstFileOutline(cp2Clean, "cp2_clean.ts", tsMod);
   assert.deepEqual(cp2Outline.map((r) => r.name), ["processBatch", "computeNetCents", "formatMoneyCents"]);
 });
+
+test("CANON-03 flags deeply nested inline generics and wide anonymous tuples in AST mode only", async () => {
+  const mod = await import("../enforcement/check_ts.mjs");
+  const tsMod = await mod.loadTypeScript();
+  if (!tsMod) {
+    return;
+  }
+  const badCode = [
+    "export function deepMatrix(",
+    "  matrix: Record<string, Map<string, Array<number>>>,",
+    "): [string, number, boolean, string, number] {",
+    "  const row: [number, number, number, number] = [1, 2, 3, 4];",
+    '  return ["ok", row[0], true, "v", 5];',
+    "}",
+    "",
+    '// topdown-ignore(CANON-03, reason="external wire format")',
+    "export function suppressedTuple(): [string, number, boolean, number] {",
+    '  return ["ok", 1, true, 2];',
+    "}",
+  ].join("\n");
+  const astViolations = mod.checkSourceWithAst(badCode, "types.ts", tsMod).filter((v) => v.rule === "CANON-03");
+  assert.equal(astViolations.length, 3, JSON.stringify(astViolations));
+  assert.ok(astViolations.some((v) => v.message.includes("nesting depth 3")));
+  assert.ok(astViolations.some((v) => v.message.includes("5 elements")));
+  assert.ok(astViolations.some((v) => v.message.includes("4 elements")));
+  assert.equal(mod.checkSource(badCode, "types.ts").filter((v) => v.rule === "CANON-03").length, 0);
+
+  const goodCode = [
+    "type DeepMap = Record<string, Map<string, Array<number>>>;",
+    "type WideRow = [number, number, number, number];",
+    "",
+    "export async function cleanSignatures(",
+    "  grouped: Record<string, number[]>,",
+    "  pairs: Array<[string, number]>,",
+    "  maybe: Record<string, number[]> | null,",
+    "): Promise<Readonly<Record<string, number[]>>> {",
+    "  const triple: [string, number, boolean] = ['a', 1, true];",
+    "  return maybe ?? grouped;",
+    "}",
+  ].join("\n");
+  const goodViolations = mod.checkSourceWithAst(goodCode, "clean_types.ts", tsMod).filter((v) => v.rule === "CANON-03");
+  assert.deepEqual(goodViolations, []);
+});

@@ -208,6 +208,7 @@ export function checkSourceWithAst(source, filePath, tsMod) {
       tsMod,
     }),
     ...checkAstFunctionRules(allFunctions, { sf, tsMod, filePath }),
+    ...checkAstTypeComplexity(allFunctions, filePath, { sf, tsMod }),
     ...checkImplicitStateMachines(cleanedLines, filePath, { directives, rawLines, commentLines }),
     ...checkTestRunnerBranching(source, cleanedLines, filePath),
   ];
@@ -1328,6 +1329,116 @@ export function checkAstDuplicateLeaves(topFunctions, ctx) {
     seenSkeletons.set(skeleton, { name: entry.name, startLine: entry.startLine });
   }
   return violations;
+}
+
+const TS_TRANSPARENT_TYPE_WRAPPERS = new Set([
+  "Promise",
+  "Readonly",
+  "Partial",
+  "Required",
+  "NonNullable",
+  "Awaited",
+]);
+
+function checkAstTypeComplexity(allFunctions, filePath, { sf, tsMod }) {
+  const violations = [];
+  const typeEntries = allFunctions.flatMap((entry) => collectTsFunctionTypeNodes(entry.node, sf, tsMod));
+  for (const { line, typeNode } of typeEntries) {
+    const { maxDepth, maxTupleWidth } = measureTsTypeComplexity(typeNode, tsMod);
+    if (maxTupleWidth >= 4) {
+      violations.push({
+        path: filePath,
+        line,
+        rule: "CANON-03",
+        message: `Anonymous tuple type has ${maxTupleWidth} elements (max 3) -> extract a NamedTuple/dataclass/interface/struct.`,
+      });
+    } else if (maxDepth >= 3) {
+      violations.push({
+        path: filePath,
+        line,
+        rule: "CANON-03",
+        message: `Inline generic type nesting depth ${maxDepth} (max 2) -> extract a named type alias or domain type.`,
+      });
+    }
+  }
+  return violations;
+}
+
+function collectTsFunctionTypeNodes(fnNode, sf, tsMod) {
+  const entries = [];
+  for (const param of fnNode.parameters ?? []) {
+    if (param.type) {
+      entries.push({ line: sf.getLineAndCharacterOfPosition(param.type.getStart(sf)).line + 1, typeNode: param.type });
+    }
+  }
+  if (fnNode.type) {
+    entries.push({ line: sf.getLineAndCharacterOfPosition(fnNode.type.getStart(sf)).line + 1, typeNode: fnNode.type });
+  }
+  if (!fnNode.body) {
+    return entries;
+  }
+  const stack = [fnNode.body];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (
+      current !== fnNode.body &&
+      (tsMod.isFunctionDeclaration(current) ||
+        tsMod.isFunctionExpression(current) ||
+        tsMod.isArrowFunction(current) ||
+        tsMod.isClassDeclaration(current) ||
+        tsMod.isClassExpression(current))
+    ) {
+      continue;
+    }
+    if (tsMod.isVariableDeclaration(current) && current.type) {
+      entries.push({
+        line: sf.getLineAndCharacterOfPosition(current.type.getStart(sf)).line + 1,
+        typeNode: current.type,
+      });
+    }
+    current.forEachChild((child) => {
+      stack.push(child);
+    });
+  }
+  return entries;
+}
+
+function measureTsTypeComplexity(typeNode, tsMod) {
+  let maxDepth = 0;
+  let maxTupleWidth = 0;
+  const stack = [{ node: typeNode, depth: 0 }];
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop();
+    if (tsMod.isTypeReferenceNode(node) && node.typeArguments && node.typeArguments.length > 0) {
+      const identName = tsMod.isIdentifier(node.typeName) ? node.typeName.text : "";
+      const baseName = tsMod.isQualifiedName(node.typeName) ? node.typeName.right.text : identName;
+      const nextDepth = TS_TRANSPARENT_TYPE_WRAPPERS.has(baseName) ? depth : depth + 1;
+      maxDepth = Math.max(maxDepth, nextDepth);
+      node.typeArguments.forEach((arg) => {
+        stack.push({ node: arg, depth: nextDepth });
+      });
+      continue;
+    }
+    if (tsMod.isArrayTypeNode(node)) {
+      const nextDepth = depth + 1;
+      maxDepth = Math.max(maxDepth, nextDepth);
+      stack.push({ node: node.elementType, depth: nextDepth });
+      continue;
+    }
+    if (tsMod.isTupleTypeNode(node)) {
+      const nextDepth = depth + 1;
+      maxDepth = Math.max(maxDepth, nextDepth);
+      maxTupleWidth = Math.max(maxTupleWidth, node.elements.length);
+      node.elements.forEach((elem) => {
+        stack.push({ node: elem, depth: nextDepth });
+      });
+      continue;
+    }
+    node.forEachChild((child) => {
+      stack.push({ node: child, depth });
+    });
+  }
+  return { maxDepth, maxTupleWidth };
 }
 
 export function countTsLeafBodyLines(fnNode, rawLines, { commentLines, sf }) {

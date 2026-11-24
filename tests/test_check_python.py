@@ -1077,6 +1077,46 @@ class TestCheckPython(unittest.TestCase):
         self.assertEqual(len(direct_viols), 1)
         self.assertEqual(direct_viols[0].rule, "LLM-08")
 
+    def test_canon03_nested_generic_types_and_wide_tuples(self) -> None:
+        import check_python
+
+        bad_code = (
+            "from typing import Optional\n\n"
+            "def deep_return(\n"
+            "    matrix: dict[str, dict[str, list[int]]],\n"
+            ") -> dict[tuple[tuple[str, int], tuple[str, int]], int]:\n"
+            "    state: tuple[int, int, int, int, bool, list[str]] = (1, 2, 3, 4, True, [])\n"
+            "    return {}\n\n"
+            "def wide_return() -> tuple[str, int, bool, float]:\n"
+            "    return ('a', 1, True, 2.0)\n\n"
+            '# topdown-ignore(CANON-03, reason="external wire format")\n'
+            "def suppressed_wide() -> tuple[str, int, bool, float]:\n"
+            "    return ('a', 1, True, 2.0)\n"
+        )
+        violations = [v for v in check_python.check_source(bad_code, "types.py") if v.rule == "CANON-03"]
+        self.assertEqual(len(violations), 4, msg=str(violations))
+        self.assertTrue(any("nesting depth 3" in v.message for v in violations))
+        self.assertTrue(any("6 elements" in v.message for v in violations))
+        self.assertTrue(any("4 elements" in v.message for v in violations))
+
+        good_code = (
+            "from typing import Callable, Optional, TypeAlias\n\n"
+            "DeepMap = dict[tuple[tuple[str, int], tuple[str, int]], int]\n"
+            "WideRow: TypeAlias = tuple[int, int, int, int]\n"
+            "type Pep695Wide = tuple[int, int, int, int]\n\n"
+            "def clean_signatures(\n"
+            "    grouped: dict[str, list[int]],\n"
+            "    pairs: list[tuple[str, int]],\n"
+            "    callback: Callable[[int, str], bool],\n"
+            ") -> Optional[dict[str, list[int]]]:\n"
+            "    maybe: dict[str, list[int]] | None = None\n"
+            "    variadic: tuple[str, ...] = ('a', 'b')\n"
+            "    triple: tuple[str, int, bool] = ('a', 1, True)\n"
+            "    return maybe\n"
+        )
+        good_violations = [v for v in check_python.check_source(good_code, "clean_types.py") if v.rule == "CANON-03"]
+        self.assertEqual(good_violations, [], msg=str(good_violations))
+
 
 if __name__ == "__main__":
     unittest.main()

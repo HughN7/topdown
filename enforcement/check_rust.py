@@ -10,6 +10,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 MAX_FUNCTION_LINES = 80
 MAX_NESTING_DEPTH = 2
@@ -336,7 +337,23 @@ def parse_ignore_directives(
     return directives, violations
 
 
-def lex_rust_source(source: str) -> tuple[str, list[tuple[int, str]], set[int]]:
+class RustLexResult(NamedTuple):
+    """Cleaned Rust source text, extracted comments, and comment-only line numbers."""
+
+    cleaned: str
+    comments: list[tuple[int, str]]
+    comment_lines: set[int]
+
+
+class SpanHeader(NamedTuple):
+    """Function span bounds and its contiguous header lines."""
+
+    start_line: int
+    end_line: int
+    header_lines: set[int]
+
+
+def lex_rust_source(source: str) -> RustLexResult:
     chars: list[str] = []
     comments: list[tuple[int, str]] = []
     raw_comment_lines: set[int] = set()
@@ -675,7 +692,7 @@ def filter_suppressed(
     cleaned_lines: list[str],
     comment_lines: set[int],
 ) -> list[Violation]:
-    span_headers: list[tuple[int, int, set[int]]] = []
+    span_headers: list[SpanHeader] = []
     for idx, span in enumerate(fn_spans):
         prev_end = max(
             (other.end_line for other in fn_spans[:idx] if other.end_line <= span.start_line),
@@ -684,7 +701,7 @@ def filter_suppressed(
         leading = collect_contiguous_header_lines(
             cleaned_lines, span.start_line, prev_end_line=prev_end, comment_lines=comment_lines
         )
-        span_headers.append((span.start_line, span.end_line, leading | {span.start_line}))
+        span_headers.append(SpanHeader(span.start_line, span.end_line, leading | {span.start_line}))
     decl_start_lines = {start_line for start_line, _, _ in span_headers}
     kept: list[Violation] = []
     for entry in violations:

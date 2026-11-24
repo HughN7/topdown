@@ -167,6 +167,67 @@ class SpanHeader(NamedTuple):
     header_lines: set[int]
 
 
+TRANSPARENT_TYPE_WRAPPERS = frozenset({
+    "Optional",
+    "Union",
+    "Annotated",
+    "Final",
+    "ClassVar",
+    "Required",
+    "NotRequired",
+    "ReadOnly",
+    "Awaitable",
+    "Coroutine",
+    "Promise",
+    "Readonly",
+    "Partial",
+    "NonNullable",
+    "Awaited",
+    "Option",
+    "Result",
+    "Box",
+    "Arc",
+    "Rc",
+    "Pin",
+    "Future",
+})
+
+TREE_TYPE_ROOT_TYPES = frozenset({
+    "type",
+    "type_annotation",
+    "user_type",
+    "tuple_type",
+    "array_type",
+    "dictionary_type",
+    "optional_type",
+})
+TREE_TYPE_FIELDS = frozenset({"type", "return_type"})
+
+
+class ChainFrame(NamedTuple):
+    """DFS frame for measuring maximum local call-chain depth."""
+
+    fn_key: FnKey
+    depth: int
+    visited: frozenset[FnKey]
+
+
+class PathFrame(NamedTuple):
+    """DFS frame for all-pairs longest call-path search."""
+
+    src: FnKey
+    current: FnKey
+    length: int
+    visited: frozenset[FnKey]
+
+
+class TypeComplexity(NamedTuple):
+    """Measured inline generic nesting depth and anonymous tuple width."""
+
+    max_depth: int
+    max_tuple_width: int
+
+
 class TreeSignature(NamedTuple):
     """Extracted async flag, parameter shape tokens, (target, default) pairs, and body statements."""
 
@@ -242,6 +303,7 @@ def analyze_source(source: str, file_path: str) -> list[Violation]:
             comment_lines=comment_lines,
         )
         + check_function_rules(all_functions, spec, file_path)
+        + check_type_complexity(all_functions, source_bytes, file_path, spec=spec)
     )
     kept = filter_suppressed(
         raw_violations,
@@ -646,6 +708,43 @@ def check_function_rules(
     return violations
 
 
+def check_type_complexity(
+    functions: list[FunctionEntry],
+    source_bytes: bytes,
+    file_path: str,
+    *,
+    spec: LanguageSpec,
+) -> list[Violation]:
+    violations: list[Violation] = []
+    type_nodes = [
+        type_node
+        for entry in functions
+        for type_node in collect_tree_type_nodes(entry.node, spec)
+    ]
+    for type_node in type_nodes:
+        complexity = measure_tree_type_complexity(type_node, source_bytes, spec)
+        line_no = type_node.start_point[0] + 1
+        if complexity.max_tuple_width >= 4:
+            violations.append(
+                Violation(
+                    file_path,
+                    line_no,
+                    "CANON-03",
+                    f"Anonymous tuple type has {complexity.max_tuple_width} elements (max 3) -> extract a NamedTuple/dataclass/interface/struct.",
+                )
+            )
+        elif complexity.max_depth >= 3:
+            violations.append(
+                Violation(
+                    file_path,
+                    line_no,
+                    "CANON-03",
+                    f"Inline generic type nesting depth {complexity.max_depth} (max 2) -> extract a named type alias or domain type.",
+                )
+            )
+    return violations
+
+
 def filter_suppressed(
     violations: list[Violation],
     top_functions: list[FunctionEntry],
@@ -798,7 +897,7 @@ def collect_local_calls(
 def compute_chain_depth(start_key: FnKey, call_graph: CallGraph) -> tuple[int, bool]:
     max_depth = 0
     deepest_has_local_call = False
-    stack: list[tuple[FnKey, int, frozenset[FnKey]]] = [(start_key, 0, frozenset({start_key}))]
+    stack: list[ChainFrame] = [ChainFrame(start_key, 0, frozenset({start_key}))]
     while stack:
         current, depth, visited = stack.pop()
         next_callees = call_graph.get(current, set())
@@ -808,7 +907,7 @@ def compute_chain_depth(start_key: FnKey, call_graph: CallGraph) -> tuple[int, b
         elif depth == max_depth and next_callees:
             deepest_has_local_call = True
         stack.extend(
-            (callee, depth + 1, visited | {callee})
+            ChainFrame(callee, depth + 1, visited | {callee})
             for callee in next_callees
             if callee not in visited
         )
@@ -921,8 +1020,8 @@ def compute_all_pairs_longest_paths(
     call_graph: CallGraph,
 ) -> dict[FnPair, int]:
     dist: dict[FnPair, int] = {}
-    stack: list[tuple[FnKey, FnKey, int, frozenset[FnKey]]] = [
-        (src, dst, 1, frozenset({src, dst}))
+    stack: list[PathFrame] = [
+        PathFrame(src, dst, 1, frozenset({src, dst}))
         for src in fn_keys
         for dst in call_graph.get(src, set())
         if dst != src
@@ -932,7 +1031,7 @@ def compute_all_pairs_longest_paths(
         if length > dist.get((src, current), 0):
             dist[(src, current)] = length
         stack.extend(
-            (src, nxt, length + 1, visited | {nxt})
+            PathFrame(src, nxt, length + 1, visited | {nxt})
             for nxt in call_graph.get(current, set())
             if nxt not in visited and length + 1 > dist.get((src, nxt), 0)
         )
@@ -1232,3 +1331,62 @@ def normalize_tree_leaf_skeleton(
             ]
             stack.extend(child_ops)
     return tuple(tokens)
+
+
+def collect_tree_type_nodes(fn_node: Any, spec: LanguageSpec) -> list[Any]:
+    type_nodes: list[Any] = []
+    stack: list[tuple[Any, str | None]] = [(fn_node, None)]
+    while stack:
+        node, field_name = stack.pop()
+        if node is not fn_node and (node.type in spec.function_nodes or node.type in spec.container_nodes):
+            continue
+        is_type_root = node.type in TREE_TYPE_ROOT_TYPES or (
+            field_name in TREE_TYPE_FIELDS and node.type not in {"parameters", "type_parameters"}
+        )
+        if node is not fn_node and is_type_root:
+            type_nodes.append(node)
+            continue
+        stack.extend(
+            (child, node.field_name_for_child(idx))
+            for idx, child in reversed(list(enumerate(node.children)))
+            if child.is_named
+        )
+    return type_nodes
+
+
+def measure_tree_type_complexity(type_node: Any, source_bytes: bytes, spec: LanguageSpec) -> TypeComplexity:
+    max_depth = 0
+    max_tuple_width = 0
+    stack: list[tuple[Any, int]] = [(type_node, 0)]
+    while stack:
+        node, depth = stack.pop()
+        node_type = node.type
+        if node_type in {"generic_type", "user_type"}:
+            has_type_args = any(ch.type in {"type_parameter", "type_arguments"} for ch in node.named_children)
+            base_node = node.named_children[0] if node.named_children else None
+            base_raw = source_bytes[base_node.start_byte : base_node.end_byte].decode("utf-8", errors="replace") if base_node is not None else ""
+            base_name = base_raw.rsplit("::", 1)[-1].rsplit(".", 1)[-1].strip()
+            increments = (node_type == "generic_type" or has_type_args) and base_name not in TRANSPARENT_TYPE_WRAPPERS
+            next_depth = depth + 1 if increments else depth
+            max_depth = max(max_depth, next_depth)
+            param_container = next((ch for ch in node.named_children if ch.type == "type_parameter"), None)
+            is_py_tuple = spec.name == "python" and base_name in {"tuple", "Tuple"} and param_container is not None
+            py_args = [ch for ch in param_container.named_children if ch.type != "comment"] if is_py_tuple else []
+            is_variadic = len(py_args) == 2 and source_bytes[py_args[1].start_byte : py_args[1].end_byte].strip() == b"..."
+            max_tuple_width = max(max_tuple_width, 0 if is_variadic else len(py_args))
+            stack.extend((ch, next_depth) for ch in node.named_children[1:])
+            continue
+        if node_type == "tuple_type":
+            next_depth = depth + 1
+            max_depth = max(max_depth, next_depth)
+            elems = [ch for ch in node.named_children if ch.type != "comment"]
+            max_tuple_width = max(max_tuple_width, len(elems))
+            stack.extend((ch, next_depth) for ch in elems)
+            continue
+        if node_type in {"array_type", "dictionary_type"}:
+            next_depth = depth + 1
+            max_depth = max(max_depth, next_depth)
+            stack.extend((ch, next_depth) for ch in node.named_children)
+            continue
+        stack.extend((ch, depth) for ch in node.named_children)
+    return TypeComplexity(max_depth=max_depth, max_tuple_width=max_tuple_width)

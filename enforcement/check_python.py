@@ -153,11 +153,32 @@ class LifecycleCandidate(NamedTuple):
     value: ast.AST | None
 
 
+TRANSPARENT_TYPE_WRAPPERS = frozenset({
+    "Optional",
+    "Union",
+    "Annotated",
+    "Final",
+    "ClassVar",
+    "Required",
+    "NotRequired",
+    "ReadOnly",
+    "Awaitable",
+    "Coroutine",
+})
+
+
 class LineSpan(NamedTuple):
     """Zero-based [start, end) line slice for a top-level function block."""
 
     start: int
     end: int
+
+
+class TypeComplexity(NamedTuple):
+    """Measured inline generic nesting depth and anonymous tuple width."""
+
+    max_depth: int
+    max_tuple_width: int
 
 
 def main() -> int:
@@ -425,6 +446,7 @@ def check_source(source: str, file_path: str) -> list[Violation]:
         )
     )
     raw_violations.extend(check_class_state_machines(all_classes, file_path))
+    raw_violations.extend(check_type_complexity(checked_functions, file_path))
     is_test_file = bool(TEST_PATH_PATTERN.search(file_path))
     for fn_node in checked_functions:
         raw_violations.extend(check_function_rules(fn_node, file_path, is_test_file=is_test_file))
@@ -627,6 +649,36 @@ def check_class_state_machines(classes: list[ast.ClassDef], file_path: str) -> l
                     cls_node.lineno,
                     "CANON-03",
                     f"Implicit state machine ({', '.join(unique_flags)}) -> replace parallel lifecycle booleans with an explicit status Enum or Literal union.",
+                )
+            )
+    return violations
+
+
+def check_type_complexity(functions: list[FuncNode], file_path: str) -> list[Violation]:
+    violations: list[Violation] = []
+    annotations = [
+        entry
+        for fn_node in functions
+        for entry in collect_function_annotations(fn_node)
+    ]
+    for line_no, ann_node in annotations:
+        complexity = measure_python_type_complexity(ann_node)
+        if complexity.max_tuple_width >= 4:
+            violations.append(
+                Violation(
+                    file_path,
+                    line_no,
+                    "CANON-03",
+                    f"Anonymous tuple type has {complexity.max_tuple_width} elements (max 3) -> extract a NamedTuple/dataclass/interface/struct.",
+                )
+            )
+        elif complexity.max_depth >= 3:
+            violations.append(
+                Violation(
+                    file_path,
+                    line_no,
+                    "CANON-03",
+                    f"Inline generic type nesting depth {complexity.max_depth} (max 2) -> extract a named type alias or domain type.",
                 )
             )
     return violations
@@ -1378,6 +1430,56 @@ def normalize_python_leaf_skeleton(
                 if fname != "type_comment"
             )
     return tuple(tokens)
+
+
+def collect_function_annotations(fn_node: FuncNode) -> list[tuple[int, ast.AST]]:
+    args = fn_node.args
+    all_args = list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+    if args.vararg is not None:
+        all_args.append(args.vararg)
+    if args.kwarg is not None:
+        all_args.append(args.kwarg)
+    annotations: list[tuple[int, ast.AST]] = [
+        (arg.lineno, arg.annotation) for arg in all_args if arg.annotation is not None
+    ]
+    if fn_node.returns is not None:
+        annotations.append((fn_node.returns.lineno, fn_node.returns))
+    body_stack: list[ast.AST] = list(fn_node.body)
+    while body_stack:
+        node = body_stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.AnnAssign):
+            annotations.append((node.lineno, node.annotation))
+        body_stack.extend(ast.iter_child_nodes(node))
+    return annotations
+
+
+def measure_python_type_complexity(type_node: ast.AST) -> TypeComplexity:
+    max_depth = 0
+    max_tuple_width = 0
+    stack: list[tuple[ast.AST, int]] = [(type_node, 0)]
+    while stack:
+        current, depth = stack.pop()
+        if isinstance(current, ast.Subscript):
+            base = current.value
+            base_name = base.id if isinstance(base, ast.Name) else ""
+            base_name = base.attr if isinstance(base, ast.Attribute) else base_name
+            next_depth = depth if base_name in TRANSPARENT_TYPE_WRAPPERS else depth + 1
+            max_depth = max(max_depth, next_depth)
+            elts = current.slice.elts if (base_name in {"tuple", "Tuple"} and isinstance(current.slice, ast.Tuple)) else []
+            is_variadic = len(elts) == 2 and isinstance(elts[1], ast.Constant) and elts[1].value is Ellipsis
+            max_tuple_width = max(max_tuple_width, 0 if is_variadic else len(elts))
+            stack.append((current.slice, next_depth))
+            continue
+        if not (isinstance(current, ast.Constant) and isinstance(current.value, str)):
+            stack.extend((child, depth) for child in ast.iter_child_nodes(current))
+            continue
+        try:
+            stack.append((ast.parse(current.value, mode="eval").body, depth))
+        except SyntaxError:
+            pass
+    return TypeComplexity(max_depth=max_depth, max_tuple_width=max_tuple_width)
 
 
 if __name__ == "__main__":
