@@ -40,7 +40,10 @@ SKIP_DELIMS = frozenset({"(", ")", "[", "]", "{", "}", ",", ";"})
 COMP_NODE_TYPES = frozenset(
     {"list_comprehension", "set_comprehension", "dictionary_comprehension", "generator_expression"}
 )
+COMP_CLAUSE_TYPES = frozenset({"for_in_clause", "if_clause"})
 CLOSURE_NODE_TYPES = frozenset({"lambda", "arrow_function", "function_expression", "closure_expression"})
+LOOP_RHS_FIELDS = frozenset({"right", "collection", "value"})
+LOOP_BODY_TYPES = frozenset({"block", "statement_block", "function_body", "statements"})
 SCOPED_BODY_TYPES = frozenset({
     "statement_block",
     "catch_clause",
@@ -164,6 +167,15 @@ class SpanHeader(NamedTuple):
     header_lines: set[int]
 
 
+class TreeSignature(NamedTuple):
+    """Extracted async flag, parameter shape tokens, (target, default) pairs, and body statements."""
+
+    is_async: bool
+    param_shape: tuple[str, ...]
+    param_ops: tuple[tuple[Any, Any], ...]
+    body_stmts: tuple[Any, ...]
+
+
 @dataclass(frozen=True)
 class Violation:
     path: str
@@ -251,12 +263,17 @@ def outline_source(source: str, file_path: str) -> list[dict[str, Any]]:
     tree = parser.parse(source_bytes)
     line_comment_lines, comment_lines = collect_tree_comment_lines(tree.root_node, source_bytes, spec)
     top_functions = collect_top_functions(tree.root_node, source_bytes, spec)
+    member_functions = collect_member_functions(tree.root_node, source_bytes, spec)
+    extra_ends = [entry.end_line for entry in member_functions] + [
+        anchor.end_line for entry in member_functions for anchor in entry.overload_anchors
+    ]
     call_graph, declared_tags, _ = collect_module_tier_context(
         top_functions,
         source_bytes,
         file_path,
         spec=spec,
         comment_sets=(line_comment_lines, comment_lines),
+        extra_end_lines=extra_ends,
     )
     fn_keys: list[FnKey] = [(entry.name, entry.start_line) for entry in top_functions]
     dist_map = compute_all_pairs_longest_paths(fn_keys, call_graph)
@@ -401,26 +418,35 @@ def collect_module_tier_context(
         )
         for entry in top_functions
     }
-    all_anchors = sorted(
-        [
-            OverloadSpan(entry.outer_start_line or entry.start_line, entry.start_line, entry.end_line)
-            for entry in top_functions
-        ]
-        + [anchor for entry in top_functions for anchor in entry.overload_anchors]
-        + [OverloadSpan(end_ln, end_ln, end_ln) for end_ln in (extra_end_lines or ())]
+    fn_anchors = [
+        (
+            entry,
+            [
+                OverloadSpan(entry.outer_start_line or entry.start_line, entry.start_line, entry.end_line),
+                *entry.overload_anchors,
+            ],
+        )
+        for entry in top_functions
+    ]
+    extra_spans = [OverloadSpan(end_ln, end_ln, end_ln) for end_ln in (extra_end_lines or ())]
+    ordered_anchors = sorted(
+        [anchor for _, anchors in fn_anchors for anchor in anchors] + extra_spans,
+        key=lambda span: (span.outer_start_line, span.start_line, span.end_line),
     )
+    anchor_index = {id(span): idx for idx, span in enumerate(ordered_anchors)}
     declared_tags: DeclaredTags = {}
     violations: list[Violation] = []
-    for entry in top_functions:
-        outer = entry.outer_start_line or entry.start_line
-        anchors = [OverloadSpan(outer, entry.start_line, entry.end_line), *entry.overload_anchors]
+    for entry, anchors in fn_anchors:
         header_lines: set[int] = set()
         for anchor in anchors:
+            cur_idx = anchor_index[id(anchor)]
             prev_end = max(
                 (
                     other.end_line
-                    for other in all_anchors
-                    if other != anchor and other.outer_start_line <= anchor.outer_start_line and other.end_line <= anchor.outer_start_line
+                    for other_idx, other in enumerate(ordered_anchors)
+                    if other is not anchor
+                    and other.end_line <= anchor.outer_start_line
+                    and (other.outer_start_line < anchor.outer_start_line or other_idx < cur_idx)
                 ),
                 default=0,
             )
@@ -552,7 +578,8 @@ def check_duplicate_leaves(
             continue
         if count_tree_leaf_body_lines(entry.node, raw_lines, comment_lines, spec=spec) < 6:
             continue
-        skeleton = normalize_tree_leaf_skeleton(entry.node, source_bytes, spec=spec)
+        sig_info = extract_tree_signature_ops(entry.node, source_bytes, spec=spec)
+        skeleton = normalize_tree_leaf_skeleton(entry.node, source_bytes, spec=spec, sig_info=sig_info)
         if not skeleton:
             continue
         first_seen = seen_skeletons.get(skeleton)
@@ -628,30 +655,32 @@ def filter_suppressed(
     comment_lines: set[int],
     lang_name: str,
 ) -> list[Violation]:
-    ordered_anchors = sorted(
+    fn_anchors = [
         (
-            anchor
-            for fn_entry in top_functions
-            for anchor in (
-                OverloadSpan(fn_entry.outer_start_line or fn_entry.start_line, fn_entry.start_line, fn_entry.end_line),
-                *fn_entry.overload_anchors,
-            )
-        ),
+            outer,
+            fn_entry,
+            [OverloadSpan(outer, fn_entry.start_line, fn_entry.end_line), *fn_entry.overload_anchors],
+        )
+        for fn_entry in top_functions
+        for outer in (fn_entry.outer_start_line or fn_entry.start_line,)
+    ]
+    ordered_anchors = sorted(
+        (anchor for _, _, anchors in fn_anchors for anchor in anchors),
         key=lambda span: (span.outer_start_line, span.start_line, span.end_line),
     )
     anchor_index = {id(span): idx for idx, span in enumerate(ordered_anchors)}
     span_headers: list[SpanHeader] = []
-    for fn_entry in top_functions:
-        outer = fn_entry.outer_start_line or fn_entry.start_line
-        anchors = [OverloadSpan(outer, fn_entry.start_line, fn_entry.end_line), *fn_entry.overload_anchors]
+    for outer, fn_entry, anchors in fn_anchors:
         header_lines = set(range(outer, fn_entry.start_line + 1))
         for anchor in anchors:
+            cur_idx = anchor_index[id(anchor)]
             prev_end = max(
                 (
                     other.end_line
                     for other_idx, other in enumerate(ordered_anchors)
-                    if other.end_line <= anchor.outer_start_line
-                    and (other.outer_start_line < anchor.outer_start_line or other_idx < anchor_index.get(id(anchor), len(ordered_anchors)))
+                    if other is not anchor
+                    and other.end_line <= anchor.outer_start_line
+                    and (other.outer_start_line < anchor.outer_start_line or other_idx < cur_idx)
                 ),
                 default=0,
             )
@@ -1066,42 +1095,84 @@ def count_tree_leaf_body_lines(
     )
 
 
-def normalize_tree_leaf_skeleton(fn_node: Any, source_bytes: bytes, *, spec: LanguageSpec) -> tuple[object, ...]:
-    """Normalize a leaf function's signature and body AST into an alpha-renamed skeleton tuple."""
-    body = fn_node.child_by_field_name("body")
-    if body is None:
-        return ()
-    is_async = any(ch.type == "async" or (ch.type == "function_modifiers" and any(mc.type == "async" for mc in ch.children)) for ch in fn_node.children)
-    p_box, single_p = fn_node.child_by_field_name("parameters"), fn_node.child_by_field_name("parameter")
-    swift_nodes = [(fn_node.field_name_for_child(idx), ch) for idx, ch in enumerate(fn_node.children) if ch.type == "parameter" or fn_node.field_name_for_child(idx) == "default_value"] if spec.name == "swift" else []
-    box_params = [(ch, None) for ch in p_box.children if ch.type in spec.param_nodes] if p_box is not None else []
-    swift_params = [(ch, swift_nodes[pos + 1][1] if pos + 1 < len(swift_nodes) and swift_nodes[pos + 1][0] == "default_value" else None) for pos, (_, ch) in enumerate(swift_nodes) if ch.type == "parameter"]
-    non_swift_params = [(single_p, None)] if single_p is not None else box_params
-    raw_params = swift_params if spec.name == "swift" else non_swift_params
+def extract_tree_signature_ops(fn_node: Any, source_bytes: bytes, *, spec: LanguageSpec) -> TreeSignature:
+    """Extract async flag, parameter shape tokens, (target, default) pairs, and body statements for LLM-08."""
+    is_async = any(
+        ch.type == "async" or (ch.type == "function_modifiers" and any(mc.type == "async" for mc in ch.children))
+        for ch in fn_node.children
+    )
+    params_box, single_param = fn_node.child_by_field_name("parameters"), fn_node.child_by_field_name("parameter")
+    if spec.name == "swift":
+        swift_items = [
+            (fn_node.field_name_for_child(idx), child)
+            for idx, child in enumerate(fn_node.children)
+            if child.type == "parameter" or fn_node.field_name_for_child(idx) == "default_value"
+        ]
+        raw_params = [
+            (child, swift_items[pos + 1][1] if pos + 1 < len(swift_items) and swift_items[pos + 1][0] == "default_value" else None)
+            for pos, (_, child) in enumerate(swift_items)
+            if child.type == "parameter"
+        ]
+    elif single_param is not None:
+        raw_params = [(single_param, None)]
+    elif params_box is not None:
+        raw_params = [(child, None) for child in params_box.children if child.type in spec.param_nodes]
+    else:
+        raw_params = []
     param_shape: list[str] = []
     param_ops: list[tuple[Any, Any]] = []
-    for pnode, ext_def in raw_params:
+    for pnode, ext_default in raw_params:
         if pnode.type in {"positional_separator", "keyword_separator"}:
             param_shape.append("/" if pnode.type == "positional_separator" else "*")
             continue
-        c_types = {ch.type for ch in pnode.children} | {pnode.type}
-        stag = next((tag for cond, tag in (("dictionary_splat_pattern" in c_types, "**"), ("list_splat_pattern" in c_types, "*"), (bool(c_types & {"rest_pattern", "variadic_parameter_declaration", "..."}), "..."), (pnode.type == "self_parameter", "self"), (pnode.type == "optional_parameter", "?")) if cond), "")
-        ext = pnode.child_by_field_name("external_name")
-        stag = f"{source_bytes[ext.start_byte:ext.end_byte].decode('utf-8', errors='replace')}:{stag}" if ext is not None else stag
+        child_types = {child.type for child in pnode.children} | {pnode.type}
+        shape_tag = ""
+        if "dictionary_splat_pattern" in child_types:
+            shape_tag = "**"
+        elif "list_splat_pattern" in child_types:
+            shape_tag = "*"
+        elif child_types & {"rest_pattern", "variadic_parameter_declaration", "..."}:
+            shape_tag = "..."
+        elif pnode.type == "self_parameter":
+            shape_tag = "self"
+        elif pnode.type == "optional_parameter":
+            shape_tag = "?"
+        ext_node = pnode.child_by_field_name("external_name")
+        if ext_node is not None:
+            ext_text = source_bytes[ext_node.start_byte : ext_node.end_byte].decode("utf-8", errors="replace")
+            shape_tag = f"{ext_text}:{shape_tag}"
         go_names = [ch for idx, ch in enumerate(pnode.children) if pnode.field_name_for_child(idx) == "name"] if spec.name == "go" else []
         fallback_tgt = pnode.named_children[0] if pnode.type == "typed_parameter" and pnode.named_children else pnode
-        targets = go_names if len(go_names) > 1 else [pnode.child_by_field_name("pattern") or pnode.child_by_field_name("left") or pnode.child_by_field_name("name") or fallback_tgt]
-        def_node = ext_def or pnode.child_by_field_name("value") or pnode.child_by_field_name("right")
-        param_shape.extend([stag] * len(targets))
-        param_ops.extend((tgt, def_node) for tgt in targets)
-    stmts = [ch for ch in body.named_children if ch.type not in spec.comment_nodes]
-    is_py_doc = spec.name == "python" and bool(stmts) and (stmts[0].type == "string" or (stmts[0].type == "expression_statement" and len(stmts[0].named_children) == 1 and stmts[0].named_children[0].type == "string"))
-    stmts = stmts[1:] if is_py_doc else stmts
-    tokens: list[object] = [("SIG", is_async, len(param_ops), tuple(param_shape))]
+        default_node = ext_default or pnode.child_by_field_name("value") or pnode.child_by_field_name("right")
+        single_tgt = pnode.child_by_field_name("pattern") or pnode.child_by_field_name("left") or pnode.child_by_field_name("name") or fallback_tgt
+        targets = go_names if len(go_names) > 1 else [single_tgt]
+        param_shape.extend([shape_tag] * len(targets))
+        param_ops.extend((tgt, default_node) for tgt in targets)
+    body = fn_node.child_by_field_name("body")
+    stmts = [child for child in body.named_children if child.type not in spec.comment_nodes] if body is not None else []
+    first = stmts[0] if stmts else None
+    is_expr_doc = first is not None and first.type == "expression_statement" and len(first.named_children) == 1 and first.named_children[0].type == "string"
+    if spec.name == "python" and first is not None and (first.type == "string" or is_expr_doc):
+        stmts = stmts[1:]
+    return TreeSignature(is_async, tuple(param_shape), tuple(param_ops), tuple(stmts))
+
+
+def normalize_tree_leaf_skeleton(
+    fn_node: Any, source_bytes: bytes, *, spec: LanguageSpec, sig_info: TreeSignature
+) -> tuple[object, ...]:
+    """Normalize a leaf function's signature and body AST into an alpha-renamed skeleton tuple."""
+    if not sig_info.body_stmts and fn_node.child_by_field_name("body") is None:
+        return ()
+    tokens: list[object] = [("SIG", sig_info.is_async, len(sig_info.param_ops), sig_info.param_shape)]
     env: dict[str, str] = {}
     scope_stack: list[dict[str, str | None]] = [{}]
     counters = [0, 0]
-    stack: list[tuple[str, Any, str | None]] = [*[("AST", stmt, "stmt") for stmt in reversed(stmts)], ("EMIT", ("END_SIG",), None), *[entry for tgt, dfn in reversed(param_ops) for entry in (("EMIT", ("NO_DEFAULT",), None) if dfn is None else ("AST", dfn, "default"), ("BIND_P", tgt, "param"))]]
+    param_ops = [
+        entry
+        for tgt, dfn in reversed(sig_info.param_ops)
+        for entry in (("EMIT", ("NO_DEFAULT",), None) if dfn is None else ("AST", dfn, "default"), ("BIND_P", tgt, "param"))
+    ]
+    stack: list[tuple[str, Any, str | None]] = [*[("AST", stmt, "stmt") for stmt in reversed(sig_info.body_stmts)], ("EMIT", ("END_SIG",), None), *param_ops]
     while stack:
         op, node, fld = stack.pop()
         if op == "EMIT":
@@ -1112,34 +1183,52 @@ def normalize_tree_leaf_skeleton(fn_node: Any, source_bytes: bytes, *, spec: Lan
         elif node.type in spec.comment_nodes or (not node.is_named and node.type in SKIP_DELIMS):
             continue
         elif node.type in spec.shorthand_nodes and op == "AST":
-            raw = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
-            tokens.append((fld, node.type, raw, env.get(raw, raw)))
-        elif node.type in IDENT_BIND_TYPES | spec.shorthand_nodes and op not in {"AST", "LIT"}:
-            raw = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
-            already = raw in (env if op == "BIND_A" else scope_stack[-1])
+            raw_text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+            tokens.append((fld, node.type, raw_text, env.get(raw_text, raw_text)))
+        elif node.type in (IDENT_BIND_TYPES | spec.shorthand_nodes) and op not in {"AST", "LIT"}:
+            raw_text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+            need_bind = raw_text not in (env if op == "BIND_A" else scope_stack[-1])
             prefix, cidx = ("$p", 0) if op == "BIND_P" else ("$v", 1)
-            scope_stack[-1].setdefault(raw, env.get(raw)) if not already else None
-            env[raw] = env[raw] if already else f"{prefix}{counters[cidx]}"
-            counters[cidx] += 0 if already else 1
-            tokens.append((fld, node.type, raw, env[raw]) if node.type in spec.shorthand_nodes else (fld, "ID", env[raw]))
+            scope_stack[-1].update({raw_text: env.get(raw_text)} if need_bind else {})
+            env.update({raw_text: f"{prefix}{counters[cidx]}"} if need_bind else {})
+            counters[cidx] += 1 if need_bind else 0
+            bound_tok = (fld, node.type, raw_text, env[raw_text]) if node.type in spec.shorthand_nodes else (fld, "ID", env[raw_text])
+            tokens.append(bound_tok)
         elif node.type in IDENT_BIND_TYPES and op == "AST":
-            tokens.append((fld, "ID", env.get(raw := source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace"), raw)))
+            raw_text = source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+            tokens.append((fld, "ID", env.get(raw_text, raw_text)))
         elif not node.children:
             tokens.append((fld, node.type, source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")))
         elif op not in {"AST", "LIT"} and node.type not in BIND_CONTAINERS:
             stack.append(("AST", node, fld))
         else:
-            has_scope = op == "AST" and (node.type in COMP_NODE_TYPES | CLOSURE_NODE_TYPES or (spec.name != "python" and node.type in SCOPED_BODY_TYPES))
-            scope_stack.extend([{}] if has_scope else [])
+            has_scope = op == "AST" and (node.type in (COMP_NODE_TYPES | CLOSURE_NODE_TYPES) or (spec.name != "python" and node.type in SCOPED_BODY_TYPES))
+            scope_stack.extend([{}] if has_scope else ())
             tokens.append((fld, "OPEN", node.type))
             stack.extend([("EMIT", ("CLOSE", node.type), None), *([("POP", None, None)] if has_scope else [])])
-            kids = list(enumerate(node.children))
-            kids = sorted(kids, key=lambda pr: 0 if pr[1].type in {"for_in_clause", "if_clause"} else 1) if node.type in COMP_NODE_TYPES else kids
-            kids = sorted(kids, key=lambda pr: 0 if node.field_name_for_child(pr[0]) in {"parameters", "parameter"} else 1) if node.type in CLOSURE_NODE_TYPES else kids
-            kids = sorted(kids, key=lambda pr: (0 if node.field_name_for_child(pr[0]) in {"right", "collection", "value"} else 1) + (2 if node.field_name_for_child(pr[0]) == "body" or pr[1].type in {"block", "statement_block", "function_body", "statements"} else 0)) if (node.type in LOOP_HEADER_TYPES or (node.type == "for_statement" and spec.name in {"python", "swift"})) else kids
-            stack.extend(
-                (next((ov for cond, ov in ((op == "LIT" or cf == "type" or f"{node.type}.{cf}" in spec.member_key_fields or (cf in spec.member_key_fields and ch.type in IDENT_BIND_TYPES), "LIT"), (op != "AST" and (node.type, cf) in BIND_DEFAULT_FIELDS, "AST"), (op != "AST", op), ((node.type, cf) in BIND_SHADOW_FIELDS or (node.type in CLOSURE_NODE_TYPES and cf in {"parameters", "parameter"}), "BIND_S"), ((node.type, cf) in BIND_ASSIGN_FIELDS, "BIND_A")) if cond), "AST"), ch, cf)
-                for idx, ch in reversed(kids)
-                for cf in (node.field_name_for_child(idx),)
+            numbered = [(idx, node.field_name_for_child(idx), child) for idx, child in enumerate(node.children)]
+            is_loop = node.type in LOOP_HEADER_TYPES or (node.type == "for_statement" and spec.name in {"python", "swift"})
+            mode = next((idx for cond, idx in ((node.type in COMP_NODE_TYPES, 0), (node.type in CLOSURE_NODE_TYPES, 1), (is_loop, 2)) if cond), -1)
+            key_fns = (
+                lambda row: 0 if row[2].type in COMP_CLAUSE_TYPES else 1,
+                lambda row: 0 if row[1] in {"parameters", "parameter"} else 1,
+                lambda row: (0 if row[1] in LOOP_RHS_FIELDS else 1) + (2 if row[1] == "body" or row[2].type in LOOP_BODY_TYPES else 0),
             )
+            numbered = sorted(numbered, key=key_fns[mode]) if mode >= 0 else numbered
+            is_closure = node.type in CLOSURE_NODE_TYPES
+            child_ops = [
+                (
+                    next((tag for cond, tag in (
+                        (op == "LIT" or cf == "type" or f"{node.type}.{cf}" in spec.member_key_fields or (cf in spec.member_key_fields and ch.type in IDENT_BIND_TYPES), "LIT"),
+                        (op != "AST" and (node.type, cf) in BIND_DEFAULT_FIELDS, "AST"),
+                        (op != "AST", op),
+                        ((node.type, cf) in BIND_SHADOW_FIELDS or (is_closure and cf in {"parameters", "parameter"}), "BIND_S"),
+                        ((node.type, cf) in BIND_ASSIGN_FIELDS, "BIND_A"),
+                    ) if cond), "AST"),
+                    ch,
+                    cf,
+                )
+                for _, cf, ch in reversed(numbered)
+            ]
+            stack.extend(child_ops)
     return tuple(tokens)

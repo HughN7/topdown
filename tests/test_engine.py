@@ -522,6 +522,15 @@ class TestUniversalEngine(unittest.TestCase):
             "  return 0;\n"
             "}\n"
         )
+        single_line_suppressed = (
+            '# topdown-ignore(LLM-05, reason="ok")\n'
+            "def foo_part1() -> int: return 1\n"
+        )
+        single_line_preceded = (
+            "def alpha() -> int: return 0\n"
+            '# topdown-ignore(LLM-05, reason="ok")\n'
+            "def beta_part2() -> int: return 2\n"
+        )
         self.assertEqual(analyze_source(ts_between_decorators, "dec.ts"), [])
         self.assertEqual(analyze_source(rust_line1_attr, "line1.rs"), [])
         self.assertEqual(analyze_source(rust_post_prev_end, "post_prev.rs"), [])
@@ -533,6 +542,8 @@ class TestUniversalEngine(unittest.TestCase):
         )
         leak_viols = analyze_source(same_line_close_no_leak, "same_line_leak.ts")
         self.assertEqual([(v.line, v.rule) for v in leak_viols], [(4, "CANON-05")])
+        self.assertEqual(analyze_source(single_line_suppressed, "single_line.py"), [])
+        self.assertEqual(analyze_source(single_line_preceded, "single_line_prev.py"), [])
 
     def test_tier_tags_no_double_diagnostic_no_l4_and_l0_adapter_outline_json(self) -> None:
         from engine.analyzer import analyze_source, outline_source
