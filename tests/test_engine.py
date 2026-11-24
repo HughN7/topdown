@@ -1278,6 +1278,31 @@ class TestUniversalEngine(unittest.TestCase):
             self.assertIn("| **Structural Compliance** | PASS | 1 files checked, 0 violations |", bound_proc.stdout)
             self.assertIn("| **Boundary Integrity (`CANON-02`)** | PASS |", bound_proc.stdout)
 
+            domain_file.write_text(
+                "import requests\n\n"
+                "def compute_price(amount_cents: int) -> int:\n"
+                "    return amount_cents - 50\n",
+                encoding="utf-8",
+            )
+            bound_fail = subprocess.run(
+                [sys.executable, "-m", "engine.cli", "--receipt", str(bound_root)],
+                cwd=str(ROOT_DIR),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(bound_fail.returncode, 1, msg=bound_fail.stderr + bound_fail.stdout)
+            self.assertIn("| **Boundary Integrity (`CANON-02`)** | FAIL | 1 CANON-02 violations across 1 pure_dirs |", bound_fail.stdout)
+
+            for bad_flags in (["--outline", "--receipt"], ["--json", "--receipt"]):
+                conflict_proc = subprocess.run(
+                    [sys.executable, "-m", "engine.cli", *bad_flags, str(bound_root)],
+                    cwd=str(ROOT_DIR),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(conflict_proc.returncode, 2, msg=f"Expected exit 2 for {bad_flags}")
+                self.assertIn("Usage:", conflict_proc.stderr)
+
 
 
 if __name__ == "__main__":

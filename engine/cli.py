@@ -39,6 +39,14 @@ class EngineOptions:
     receipt: bool = False
 
 
+@dataclass(frozen=True)
+class ReceiptStats:
+    files_checked: int
+    waivers: int
+    boundaries_enabled: bool
+    pure_dirs_count: int
+
+
 def main() -> int:
     options = parse_cli_args(sys.argv[1:])
     if options is None:
@@ -86,12 +94,12 @@ def main() -> int:
             print(f"Engine error on {file_path}: {exc}", file=sys.stderr)
             return 2
     if options.receipt:
-        receipt_stats: dict[str, object] = {
-            "files_checked": len(target_files),
-            "waivers": waiver_count,
-            "boundaries_enabled": boundary_cfg is not None and bool(boundary_cfg.pure_dirs),
-            "pure_dirs_count": len(boundary_cfg.pure_dirs) if boundary_cfg is not None else 0,
-        }
+        receipt_stats = ReceiptStats(
+            files_checked=len(target_files),
+            waivers=waiver_count,
+            boundaries_enabled=boundary_cfg is not None and bool(boundary_cfg.pure_dirs),
+            pure_dirs_count=len(boundary_cfg.pure_dirs) if boundary_cfg is not None else 0,
+        )
         print(format_verification_receipt(receipt_stats, all_violations))
     else:
         emit_violations(all_violations, as_json=options.as_json)
@@ -173,7 +181,7 @@ def parse_cli_args(raw_args: list[str]) -> EngineOptions | None:
         else:
             paths.append(token)
         idx += 1
-    if not paths:
+    if not paths or (receipt and (outline or as_json)):
         return None
     return EngineOptions(
         paths=tuple(paths),
@@ -248,22 +256,15 @@ def count_waiver_comments(source_text: str) -> int:
     return waiver_count
 
 
-def format_verification_receipt(stats: dict[str, object], violations: list[object]) -> str:
-    raw_files = stats.get("files_checked", 0)
-    files_checked = raw_files if isinstance(raw_files, int) and not isinstance(raw_files, bool) else 0
-    raw_waivers = stats.get("waivers", 0)
-    waivers = raw_waivers if isinstance(raw_waivers, int) and not isinstance(raw_waivers, bool) else 0
-    boundaries_enabled = bool(stats.get("boundaries_enabled", False))
-    raw_pure_dirs = stats.get("pure_dirs_count", 0)
-    pure_dirs_count = raw_pure_dirs if isinstance(raw_pure_dirs, int) and not isinstance(raw_pure_dirs, bool) else 0
+def format_verification_receipt(stats: ReceiptStats, violations: list[object]) -> str:
     boundary_violations = [entry for entry in violations if getattr(entry, "rule", "") == "CANON-02"]
     if boundary_violations:
         boundary_status = "FAIL"
-        scope = f" across {pure_dirs_count} pure_dirs" if pure_dirs_count > 0 else ""
+        scope = f" across {stats.pure_dirs_count} pure_dirs" if stats.pure_dirs_count > 0 else ""
         boundary_detail = f"{len(boundary_violations)} CANON-02 violations{scope}"
-    elif boundaries_enabled:
+    elif stats.boundaries_enabled:
         boundary_status = "PASS"
-        boundary_detail = f"0 CANON-02 violations across {pure_dirs_count} pure_dirs"
+        boundary_detail = f"0 CANON-02 violations across {stats.pure_dirs_count} pure_dirs"
     else:
         boundary_status = "Opt-in"
         boundary_detail = "No pure_dirs configured in topdown.toml"
@@ -273,8 +274,8 @@ def format_verification_receipt(stats: dict[str, object], violations: list[objec
         "",
         "| Check | Status | Details |",
         "|---|---|---|",
-        f"| **Structural Compliance** | {structural_status} | {files_checked} files checked, {len(violations)} violations |",
-        f"| **Override Waivers (`CANON-08`)** | {waivers} waivers | Explicit `topdown-ignore` annotations across checked files |",
+        f"| **Structural Compliance** | {structural_status} | {stats.files_checked} files checked, {len(violations)} violations |",
+        f"| **Override Waivers (`CANON-08`)** | {stats.waivers} waivers | Explicit `topdown-ignore` annotations across checked files |",
         f"| **Boundary Integrity (`CANON-02`)** | {boundary_status} | {boundary_detail} |",
     ]
     if violations:

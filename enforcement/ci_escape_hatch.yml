@@ -45,7 +45,7 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           set -euo pipefail
-          CHANGED_RULES=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep -E '^(topdown\.toml|.*/topdown\.toml|(core|languages|zones)/.+)$' || true)
+          CHANGED_RULES=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep -E '^(topdown\.toml|.*/topdown\.toml|AGENTS\.md|.*/AGENTS\.md|(core|languages|zones)/.+\.md)$' || true)
 
           if [ -z "$CHANGED_RULES" ]; then
             echo "No Topdown rule or config modifications detected."
