@@ -12,6 +12,7 @@ import sys
 import tokenize
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 MAX_FUNCTION_LINES = 80
 MAX_POSITIONAL_ARGS = 3
@@ -78,6 +79,87 @@ class CliOptions:
     outline: bool = False
 
 
+FuncNode = ast.FunctionDef | ast.AsyncFunctionDef
+DeclNode = FuncNode | ast.ClassDef
+FnKey = tuple[str, int]
+FnPair = tuple[FnKey, FnKey]
+CallGraph = dict[FnKey, set[FnKey]]
+DeclaredTags = dict[FnKey, int | None]
+DistMap = dict[FnPair, int]
+OverloadMap = dict[int, list[FuncNode]]
+LeafSkeleton = tuple[object, ...]
+OutlineEntry = dict[str, object]
+ScopeSnapshot = dict[str, str | None]
+SkeletonTask = tuple[str, object]
+
+
+class TierContext(NamedTuple):
+    """Module call graph, declared [L0..L3] tier tags, and multi-tag violations."""
+
+    call_graph: CallGraph
+    declared_tags: DeclaredTags
+    violations: list[Violation]
+
+
+class TierBounds(NamedTuple):
+    """Computed call-graph depth, height, and valid [L0..L3] tier bounds."""
+
+    depth: int
+    height: int
+    lb_0: int
+    ub_0: int
+    is_adapter: bool
+    inferred_tiers: list[str]
+
+
+class IgnoreContext(NamedTuple):
+    """Parsed ignore directives, malformed-ignore violations, and standalone comment lines."""
+
+    directives: dict[int, IgnoreDirective]
+    violations: list[Violation]
+    comment_lines: set[int]
+
+
+class SpanHeader(NamedTuple):
+    """Function span and its suppression header lines."""
+
+    outer_start_line: int
+    end_line: int
+    header_lines: set[int]
+
+
+class ChainFrame(NamedTuple):
+    """DFS stack frame for measuring maximum call-chain depth."""
+
+    fn_key: FnKey
+    depth: int
+    visited: frozenset[FnKey]
+
+
+class PathFrame(NamedTuple):
+    """DFS stack frame for all-pairs longest call-path search."""
+
+    src: FnKey
+    current: FnKey
+    length: int
+    visited: frozenset[FnKey]
+
+
+class LifecycleCandidate(NamedTuple):
+    """Candidate variable or attribute checked for lifecycle boolean flags."""
+
+    name: str
+    annotation: ast.AST | None
+    value: ast.AST | None
+
+
+class LineSpan(NamedTuple):
+    """Zero-based [start, end) line slice for a top-level function block."""
+
+    start: int
+    end: int
+
+
 def main() -> int:
     options = parse_cli_args(sys.argv[1:])
     if options is None:
@@ -111,7 +193,7 @@ def main() -> int:
 
 
 def run_outline_cli(target_files: list[Path], *, as_json: bool) -> int:
-    payload: list[dict[str, object]] = []
+    payload: list[OutlineEntry] = []
     for file_path in target_files:
         source_text, read_error = read_source_text(file_path)
         if read_error is not None:
@@ -175,8 +257,8 @@ def fix_source(source: str) -> tuple[str, str | None]:
     non_overload_names = [fn_node.name for fn_node in top_functions if not is_overload_fn(fn_node)]
     if len(set(non_overload_names)) != len(non_overload_names):
         return source, "Refused --fix: duplicate top-level function names detected."
-    fn_lines = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
-    call_graph = {
+    fn_lines: dict[FnKey, int] = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
+    call_graph: CallGraph = {
         (fn_node.name, fn_node.lineno): collect_local_calls(fn_node, fn_lines)
         for fn_node in top_functions
     }
@@ -191,7 +273,7 @@ def fix_source(source: str) -> tuple[str, str | None]:
     return reordered, None
 
 
-def build_file_outline(source: str, file_path: str) -> list[dict[str, object]]:
+def build_file_outline(source: str, file_path: str) -> list[OutlineEntry]:
     tree = ast.parse(source, filename=file_path)
     _, _, line_comment_lines = parse_ignore_directives(source, file_path)
     raw_lines = source.split("\n")
@@ -211,12 +293,12 @@ def build_file_outline(source: str, file_path: str) -> list[dict[str, object]]:
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     ]
-    fn_lines = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
-    call_graph = {
+    fn_lines: dict[FnKey, int] = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
+    call_graph: CallGraph = {
         (fn_node.name, fn_node.lineno): collect_local_calls(fn_node, fn_lines) - {(fn_node.name, fn_node.lineno)}
         for fn_node in top_functions
     }
-    declared_tags: dict[tuple[str, int], int | None] = {}
+    declared_tags: DeclaredTags = {}
     for fn_node in top_functions:
         anchors = [fn_node, *preceding_overloads.get(id(fn_node), ())]
         leading = collect_contiguous_header_lines(
@@ -232,15 +314,15 @@ def build_file_outline(source: str, file_path: str) -> list[dict[str, object]]:
         }
         tag_val, _ = extract_function_tier_tags(raw_lines, (leading | span_lines) & line_comment_lines)
         declared_tags[(fn_node.name, fn_node.lineno)] = tag_val
-    fn_keys = [(fn_node.name, fn_node.lineno) for fn_node in top_functions]
+    fn_keys: list[FnKey] = [(fn_node.name, fn_node.lineno) for fn_node in top_functions]
     dist_map = compute_all_pairs_longest_paths(fn_keys, call_graph)
     bounds_map = compute_tier_bounds(fn_keys, dist_map, declared_tags=declared_tags)
-    entries: list[dict[str, object]] = []
+    entries: list[OutlineEntry] = []
     for fn_node in top_functions:
-        fn_key = (fn_node.name, fn_node.lineno)
+        fn_key: FnKey = (fn_node.name, fn_node.lineno)
         end_line = fn_node.end_lineno or fn_node.lineno
         tag_val = declared_tags.get(fn_key)
-        valid_tiers = bounds_map[fn_key][5]
+        valid_tiers = bounds_map[fn_key].inferred_tiers
         callers = sorted({caller_key[0] for caller_key in fn_keys if fn_key in call_graph.get(caller_key, set())})
         callees = sorted({callee_key[0] for callee_key in call_graph.get(fn_key, set())})
         entries.append(
@@ -258,7 +340,7 @@ def build_file_outline(source: str, file_path: str) -> list[dict[str, object]]:
     return entries
 
 
-def format_outline_text(payload: list[dict[str, object]]) -> str:
+def format_outline_text(payload: list[OutlineEntry]) -> str:
     blocks: list[str] = []
     for file_entry in payload:
         lines = [str(file_entry["path"])]
@@ -358,14 +440,14 @@ def check_source(source: str, file_path: str) -> list[Violation]:
 
 
 def check_order_and_depth(
-    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    top_functions: list[FuncNode],
     file_path: str,
 ) -> list[Violation]:
     violations: list[Violation] = []
-    fn_lines = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
-    call_graph: dict[tuple[str, int], set[tuple[str, int]]] = {}
+    fn_lines: dict[FnKey, int] = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
+    call_graph: CallGraph = {}
     for fn_node in top_functions:
-        fn_key = (fn_node.name, fn_node.lineno)
+        fn_key: FnKey = (fn_node.name, fn_node.lineno)
         callees = collect_local_calls(fn_node, fn_lines)
         call_graph[fn_key] = callees
         out_of_order = [
@@ -407,24 +489,20 @@ def check_order_and_depth(
 
 
 def collect_module_tier_context(
-    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    top_functions: list[FuncNode],
     raw_lines: list[str],
     file_path: str,
     *,
     line_comment_lines: set[int],
     all_end_lines: list[int],
-    preceding_overloads: dict[int, list[ast.FunctionDef | ast.AsyncFunctionDef]],
-) -> tuple[
-    dict[tuple[str, int], set[tuple[str, int]]],
-    dict[tuple[str, int], int | None],
-    list[Violation],
-]:
-    fn_lines = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
-    call_graph = {
+    preceding_overloads: OverloadMap,
+) -> TierContext:
+    fn_lines: dict[FnKey, int] = {(fn_node.name, fn_node.lineno): fn_node.lineno for fn_node in top_functions}
+    call_graph: CallGraph = {
         (fn_node.name, fn_node.lineno): collect_local_calls(fn_node, fn_lines) - {(fn_node.name, fn_node.lineno)}
         for fn_node in top_functions
     }
-    declared_tags: dict[tuple[str, int], int | None] = {}
+    declared_tags: DeclaredTags = {}
     violations: list[Violation] = []
     for fn_node in top_functions:
         anchors = [fn_node, *preceding_overloads.get(id(fn_node), ())]
@@ -447,45 +525,45 @@ def collect_module_tier_context(
             violations.append(
                 Violation(file_path, fn_node.lineno, "CANON-01", f"'{fn_node.name}' has multiple tier tags -> keep a single [L0]..[L3] tag.")
             )
-    return call_graph, declared_tags, violations
+    return TierContext(call_graph, declared_tags, violations)
 
 
 def check_tier_tags(
-    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    top_functions: list[FuncNode],
     file_path: str,
     *,
-    call_graph: dict[tuple[str, int], set[tuple[str, int]]],
-    declared_tags: dict[tuple[str, int], int | None],
+    call_graph: CallGraph,
+    declared_tags: DeclaredTags,
 ) -> list[Violation]:
     violations: list[Violation] = []
-    fn_keys = [(fn_node.name, fn_node.lineno) for fn_node in top_functions]
+    fn_keys: list[FnKey] = [(fn_node.name, fn_node.lineno) for fn_node in top_functions]
     dist_map = compute_all_pairs_longest_paths(fn_keys, call_graph)
     bounds_map = compute_tier_bounds(fn_keys, dist_map, declared_tags=declared_tags)
     for fn_node in top_functions:
-        fn_key = (fn_node.name, fn_node.lineno)
+        fn_key: FnKey = (fn_node.name, fn_node.lineno)
         tag_val = declared_tags.get(fn_key)
         if tag_val is None:
             continue
-        d_max, height, lb_0, ub_0, is_adapter, _ = bounds_map[fn_key]
-        valid_0 = [f"[L{tier}]" for tier in range(4) if lb_0 <= tier <= ub_0]
+        bounds = bounds_map[fn_key]
+        valid_0 = [f"[L{tier}]" for tier in range(4) if bounds.lb_0 <= tier <= bounds.ub_0]
         bad_ancestors = [
             (anc_key, dist_map[(anc_key, fn_key)])
             for anc_key in fn_keys
             if anc_key != fn_key
             and declared_tags.get(anc_key) is not None
             and (anc_key, fn_key) in dist_map
-            and not (dist_map[(anc_key, fn_key)] == 1 and declared_tags[anc_key] == 0 and tag_val == 0 and is_adapter)
+            and not (dist_map[(anc_key, fn_key)] == 1 and declared_tags[anc_key] == 0 and tag_val == 0 and bounds.is_adapter)
             and tag_val - declared_tags[anc_key] < dist_map[(anc_key, fn_key)]
         ]
-        if tag_val == 3 and height > 0:
+        if tag_val == 3 and bounds.height > 0:
             violations.append(
                 Violation(file_path, fn_node.lineno, "CANON-01", f"'{fn_node.name}' is tagged [L3] (leaf) but calls local functions -> update tag or move local calls to L1/L2.")
             )
-        elif tag_val < lb_0 or tag_val > ub_0:
+        elif tag_val < bounds.lb_0 or tag_val > bounds.ub_0:
             msg = (
-                f"'{fn_node.name}' is tagged [L{tag_val}] outside valid tier range ({', '.join(valid_0)}) for depth {d_max} and height {height} -> update tier tag."
+                f"'{fn_node.name}' is tagged [L{tag_val}] outside valid tier range ({', '.join(valid_0)}) for depth {bounds.depth} and height {bounds.height} -> update tier tag."
                 if valid_0
-                else f"'{fn_node.name}' is tagged [L{tag_val}] in a call chain exceeding L0->L3 ceiling (depth {d_max}, height {height}) -> flatten call depth."
+                else f"'{fn_node.name}' is tagged [L{tag_val}] in a call chain exceeding L0->L3 ceiling (depth {bounds.depth}, height {bounds.height}) -> flatten call depth."
             )
             violations.append(Violation(file_path, fn_node.lineno, "CANON-01", msg))
         elif bad_ancestors:
@@ -503,18 +581,18 @@ def check_tier_tags(
 
 
 def check_duplicate_leaves(
-    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    top_functions: list[FuncNode],
     raw_lines: list[str],
     file_path: str,
     *,
-    call_graph: dict[tuple[str, int], set[tuple[str, int]]],
-    declared_tags: dict[tuple[str, int], int | None],
+    call_graph: CallGraph,
+    declared_tags: DeclaredTags,
     comment_lines: set[int],
 ) -> list[Violation]:
     violations: list[Violation] = []
-    seen_skeletons: dict[tuple[object, ...], tuple[str, int]] = {}
+    seen_skeletons: dict[LeafSkeleton, FnKey] = {}
     for fn_node in top_functions:
-        fn_key = (fn_node.name, fn_node.lineno)
+        fn_key: FnKey = (fn_node.name, fn_node.lineno)
         callees = (call_graph[fn_key] - {fn_key}) if fn_key in call_graph else (call_graph.get(fn_node.name, set()) - {fn_node.name})
         tag_val = declared_tags[fn_key] if fn_key in declared_tags else declared_tags.get(fn_node.name)
         if callees or tag_val == 0:
@@ -555,7 +633,7 @@ def check_class_state_machines(classes: list[ast.ClassDef], file_path: str) -> l
 
 
 def check_function_rules(
-    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    fn_node: FuncNode,
     file_path: str,
     *,
     is_test_file: bool = False,
@@ -680,7 +758,7 @@ def emit_violations(violations: list[Violation], *, as_json: bool) -> None:
 def parse_ignore_directives(
     source: str,
     file_path: str,
-) -> tuple[dict[int, IgnoreDirective], list[Violation], set[int]]:
+) -> IgnoreContext:
     directives: dict[int, IgnoreDirective] = {}
     violations: list[Violation] = []
     line_comment_lines: set[int] = set()
@@ -707,17 +785,17 @@ def parse_ignore_directives(
             violations.append(
                 Violation(file_path, line_no, "CANON-08", 'topdown-ignore requires a non-empty reason="...".')
             )
-    return directives, violations, line_comment_lines
+    return IgnoreContext(directives, violations, line_comment_lines)
 
 
 def filter_suppressed(
     violations: list[Violation],
-    checked_functions: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef],
+    checked_functions: list[DeclNode],
     directives: dict[int, IgnoreDirective],
     *,
     raw_lines: list[str],
     comment_lines: set[int],
-    preceding_overloads: dict[int, list[ast.FunctionDef | ast.AsyncFunctionDef]] | None = None,
+    preceding_overloads: OverloadMap | None = None,
 ) -> list[Violation]:
     overload_map = preceding_overloads or {}
     all_end_lines = [
@@ -725,7 +803,7 @@ def filter_suppressed(
         for decl in checked_functions
         for anchor in (decl, *overload_map.get(id(decl), ()))
     ]
-    fn_spans: list[tuple[int, int, set[int]]] = []
+    span_headers: list[SpanHeader] = []
     for fn_node in checked_functions:
         dec_line = fn_node.decorator_list[0].lineno if fn_node.decorator_list else fn_node.lineno
         end_line = fn_node.lineno if isinstance(fn_node, ast.ClassDef) else (fn_node.end_lineno or fn_node.lineno)
@@ -741,15 +819,17 @@ def filter_suppressed(
                 anchor.lineno + 1,
             )
         }
-        fn_spans.append((dec_line, end_line, leading | span_lines))
-    decl_start_lines = {dec_line for dec_line, _, _ in fn_spans} | {fn_node.lineno for fn_node in checked_functions}
+        span_headers.append(SpanHeader(dec_line, end_line, leading | span_lines))
+    decl_start_lines = {span.outer_start_line for span in span_headers} | {
+        fn_node.lineno for fn_node in checked_functions
+    }
     kept: list[Violation] = []
     for entry in violations:
         span_lines = {
             line_num
-            for dec_line, end_line, header_set in fn_spans
-            if dec_line <= entry.line <= end_line
-            for line_num in header_set
+            for span in span_headers
+            if span.outer_start_line <= entry.line <= span.end_line
+            for line_num in span.header_lines
         }
         prev_comment = (
             {entry.line - 1}
@@ -768,7 +848,7 @@ def filter_suppressed(
     return kept
 
 
-def is_overload_fn(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+def is_overload_fn(fn_node: FuncNode) -> bool:
     return any(
         (isinstance(dec, ast.Name) and dec.id == "overload")
         or (
@@ -784,9 +864,9 @@ def is_overload_fn(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 def collect_preceding_overloads(
     stmts: list[ast.stmt],
     overload_ids: set[int],
-) -> dict[int, list[ast.FunctionDef | ast.AsyncFunctionDef]]:
-    preceding: dict[int, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
-    pending: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+) -> OverloadMap:
+    preceding: OverloadMap = {}
+    pending: list[FuncNode] = []
     for stmt in stmts:
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
             pending = []
@@ -800,10 +880,10 @@ def collect_preceding_overloads(
 
 
 def collect_local_calls(
-    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
-    fn_lines: dict[tuple[str, int], int],
-) -> set[tuple[str, int]]:
-    keys_by_name: dict[str, list[tuple[str, int]]] = {}
+    fn_node: FuncNode,
+    fn_lines: dict[FnKey, int],
+) -> set[FnKey]:
+    keys_by_name: dict[str, list[FnKey]] = {}
     for fn_key in fn_lines:
         keys_by_name.setdefault(fn_key[0], []).append(fn_key)
     roots: list[ast.AST] = [
@@ -821,14 +901,12 @@ def collect_local_calls(
 
 
 def compute_chain_depth(
-    start_key: tuple[str, int],
-    call_graph: dict[tuple[str, int], set[tuple[str, int]]],
+    start_key: FnKey,
+    call_graph: CallGraph,
 ) -> tuple[int, bool]:
     max_depth = 0
     deepest_has_local_call = False
-    stack: list[tuple[tuple[str, int], int, frozenset[tuple[str, int]]]] = [
-        (start_key, 0, frozenset({start_key}))
-    ]
+    stack: list[ChainFrame] = [ChainFrame(start_key, 0, frozenset({start_key}))]
     while stack:
         current, depth, visited = stack.pop()
         next_callees = call_graph.get(current, set())
@@ -838,14 +916,14 @@ def compute_chain_depth(
         elif depth == max_depth and next_callees:
             deepest_has_local_call = True
         stack.extend(
-            (callee, depth + 1, visited | {callee})
+            ChainFrame(callee, depth + 1, visited | {callee})
             for callee in next_callees
             if callee not in visited
         )
     return max_depth, deepest_has_local_call
 
 
-def count_parameters(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[int, int]:
+def count_parameters(fn_node: FuncNode) -> tuple[int, int]:
     args = fn_node.args
     positional = [arg.arg for arg in args.posonlyargs + args.args]
     if positional and positional[0] in {"self", "cls"}:
@@ -855,7 +933,7 @@ def count_parameters(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[i
     return pos_count, total_count
 
 
-def measure_max_nesting(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+def measure_max_nesting(fn_node: FuncNode) -> int:
     max_depth = 0
     stack: list[tuple[ast.AST, int]] = [(stmt, 0) for stmt in fn_node.body]
     while stack:
@@ -872,9 +950,7 @@ def measure_max_nesting(fn_node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     return max_depth
 
 
-def collect_node_lifecycle_flags(
-    scope_node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
-) -> list[str]:
+def collect_node_lifecycle_flags(scope_node: DeclNode) -> list[str]:
     is_class = isinstance(scope_node, ast.ClassDef)
     boundary_types = (ast.ClassDef,) if is_class else (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
     owned_nodes: list[ast.AST] = []
@@ -885,7 +961,7 @@ def collect_node_lifecycle_flags(
             continue
         owned_nodes.append(current)
         queue.extend(ast.iter_child_nodes(current))
-    candidates: list[tuple[str, ast.AST | None, ast.AST | None]] = []
+    candidates: list[LifecycleCandidate] = []
     if not is_class:
         pos_params = scope_node.args.posonlyargs + scope_node.args.args
         pad_count = len(pos_params) - len(scope_node.args.defaults)
@@ -893,15 +969,15 @@ def collect_node_lifecycle_flags(
         param_pairs = list(zip(pos_params, pos_defaults)) + list(
             zip(scope_node.args.kwonlyargs, scope_node.args.kw_defaults)
         )
-        candidates.extend((param.arg, param.annotation, default) for param, default in param_pairs)
+        candidates.extend(LifecycleCandidate(param.arg, param.annotation, default) for param, default in param_pairs)
     target_stmts = scope_node.body if is_class else owned_nodes
     candidates.extend(
-        (stmt.target.id, stmt.annotation, stmt.value)
+        LifecycleCandidate(stmt.target.id, stmt.annotation, stmt.value)
         for stmt in target_stmts
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
     )
     candidates.extend(
-        (target.id, None, stmt.value)
+        LifecycleCandidate(target.id, None, stmt.value)
         for stmt in target_stmts
         if isinstance(stmt, ast.Assign)
         for target in stmt.targets
@@ -909,7 +985,7 @@ def collect_node_lifecycle_flags(
     )
     if is_class:
         candidates.extend(
-            (node.target.attr, node.annotation, node.value)
+            LifecycleCandidate(node.target.attr, node.annotation, node.value)
             for node in owned_nodes
             if isinstance(node, ast.AnnAssign)
             and isinstance(node.target, ast.Attribute)
@@ -917,7 +993,7 @@ def collect_node_lifecycle_flags(
             and node.target.value.id == "self"
         )
         candidates.extend(
-            (target.attr, None, node.value)
+            LifecycleCandidate(target.attr, None, node.value)
             for node in owned_nodes
             if isinstance(node, ast.Assign)
             for target in node.targets
@@ -950,7 +1026,7 @@ def collect_node_lifecycle_flags(
 
 
 def scan_body_violations(
-    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    fn_node: FuncNode,
     file_path: str,
 ) -> list[Violation]:
     violations: list[Violation] = []
@@ -1004,7 +1080,7 @@ def scan_body_violations(
 
 
 def scan_test_runner_branching(
-    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    fn_node: FuncNode,
     file_path: str,
 ) -> list[Violation]:
     violations: list[Violation] = []
@@ -1030,8 +1106,8 @@ def scan_test_runner_branching(
 
 
 def topological_sort_functions(
-    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
-    call_graph: dict[tuple[str, int], set[tuple[str, int]]],
+    top_functions: list[FuncNode],
+    call_graph: CallGraph,
 ) -> list[int] | None:
     key_to_idx = {(fn_node.name, fn_node.lineno): idx for idx, fn_node in enumerate(top_functions)}
     in_degree = [0] * len(top_functions)
@@ -1061,11 +1137,11 @@ def topological_sort_functions(
 
 def rebuild_reordered_source(
     source: str,
-    top_functions: list[ast.FunctionDef | ast.AsyncFunctionDef],
+    top_functions: list[FuncNode],
     ordered_indices: list[int],
 ) -> str | None:
     lines = source.splitlines(keepends=True)
-    spans: list[tuple[int, int]] = []
+    spans: list[LineSpan] = []
     prev_end = 0
     for fn_node in top_functions:
         start_idx = fn_node.lineno - 1
@@ -1078,11 +1154,11 @@ def rebuild_reordered_source(
         if prev_end > 0 and any(line_text.strip() for line_text in lines[prev_end:start_idx]):
             return None
         end_idx = fn_node.end_lineno or fn_node.lineno
-        spans.append((start_idx, end_idx))
+        spans.append(LineSpan(start_idx, end_idx))
         prev_end = end_idx
-    prefix = "".join(lines[: spans[0][0]])
-    suffix = "".join(lines[spans[-1][1] :])
-    blocks = ["".join(lines[spans[idx][0] : spans[idx][1]]).rstrip("\r\n") for idx in ordered_indices]
+    prefix = "".join(lines[: spans[0].start])
+    suffix = "".join(lines[spans[-1].end :])
+    blocks = ["".join(lines[spans[idx].start : spans[idx].end]).rstrip("\r\n") for idx in ordered_indices]
     trailing_newline = "\n" if source.endswith("\n") else ""
     if suffix:
         sep = "\n" if suffix.startswith(("\n", "\r\n")) else "\n\n"
@@ -1092,7 +1168,7 @@ def rebuild_reordered_source(
 
 def collect_contiguous_header_lines(
     raw_lines: list[str],
-    anchor_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef],
+    anchor_nodes: list[DeclNode],
     *,
     all_end_lines: list[int],
     comment_lines: set[int],
@@ -1129,12 +1205,12 @@ def extract_function_tier_tags(
 
 
 def compute_all_pairs_longest_paths(
-    fn_keys: list[tuple[str, int]],
-    call_graph: dict[tuple[str, int], set[tuple[str, int]]],
-) -> dict[tuple[tuple[str, int], tuple[str, int]], int]:
-    dist: dict[tuple[tuple[str, int], tuple[str, int]], int] = {}
-    stack: list[tuple[tuple[str, int], tuple[str, int], int, frozenset[tuple[str, int]]]] = [
-        (src, dst, 1, frozenset({src, dst}))
+    fn_keys: list[FnKey],
+    call_graph: CallGraph,
+) -> DistMap:
+    dist: DistMap = {}
+    stack: list[PathFrame] = [
+        PathFrame(src, dst, 1, frozenset({src, dst}))
         for src in fn_keys
         for dst in call_graph.get(src, set())
         if dst != src
@@ -1144,7 +1220,7 @@ def compute_all_pairs_longest_paths(
         if length > dist.get((src, current), 0):
             dist[(src, current)] = length
         stack.extend(
-            (src, nxt, length + 1, visited | {nxt})
+            PathFrame(src, nxt, length + 1, visited | {nxt})
             for nxt in call_graph.get(current, set())
             if nxt not in visited and length + 1 > dist.get((src, nxt), 0)
         )
@@ -1152,11 +1228,11 @@ def compute_all_pairs_longest_paths(
 
 
 def compute_tier_bounds(
-    fn_keys: list[tuple[str, int]],
-    dist: dict[tuple[tuple[str, int], tuple[str, int]], int],
+    fn_keys: list[FnKey],
+    dist: DistMap,
     *,
-    declared_tags: dict[tuple[str, int], int | None],
-) -> dict[tuple[str, int], tuple[int, int, int, int, bool, list[str]]]:
+    declared_tags: DeclaredTags,
+) -> dict[FnKey, TierBounds]:
     d_max_map = {
         fn_key: max((length for (src, dst), length in dist.items() if dst == fn_key), default=0)
         for fn_key in fn_keys
@@ -1176,7 +1252,7 @@ def compute_tier_bounds(
             if dst == fn_key and length == 1
         )
     }
-    bounds: dict[tuple[str, int], tuple[int, int, int, int, bool, list[str]]] = {}
+    bounds: dict[FnKey, TierBounds] = {}
     for fn_key in fn_keys:
         is_adapter = fn_key in l0_adapters
         lb_0 = 0 if is_adapter else d_max_map[fn_key]
@@ -1196,12 +1272,12 @@ def compute_tier_bounds(
         lb = max([lb_0, *anc_lbs])
         ub = min([ub_0, *desc_ubs])
         valid_tiers = [f"L{tier}" for tier in range(4) if lb <= tier <= ub]
-        bounds[fn_key] = (d_max_map[fn_key], height_map[fn_key], lb_0, ub_0, is_adapter, valid_tiers)
+        bounds[fn_key] = TierBounds(d_max_map[fn_key], height_map[fn_key], lb_0, ub_0, is_adapter, valid_tiers)
     return bounds
 
 
 def count_python_leaf_body_lines(
-    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    fn_node: FuncNode,
     raw_lines: list[str],
     comment_lines: set[int],
 ) -> int:
@@ -1227,16 +1303,16 @@ def count_python_leaf_body_lines(
 
 
 def normalize_python_leaf_skeleton(
-    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> tuple[object, ...]:
+    fn_node: FuncNode,
+) -> LeafSkeleton:
     body_stmts = fn_node.body
     if body_stmts and isinstance(body_stmts[0], ast.Expr) and isinstance(body_stmts[0].value, ast.Constant) and isinstance(body_stmts[0].value.value, str):
         body_stmts = body_stmts[1:]
     env: dict[str, str] = {}
     next_var = [0]
-    scope_stack: list[dict[str, str | None]] = []
+    scope_stack: list[ScopeSnapshot] = []
     tokens: list[object] = []
-    stack: list[tuple[str, object]] = [("ARGS", ("SIG", isinstance(fn_node, ast.AsyncFunctionDef), fn_node.args, body_stmts))]
+    stack: list[SkeletonTask] = [("ARGS", ("SIG", isinstance(fn_node, ast.AsyncFunctionDef), fn_node.args, body_stmts))]
     while stack:
         tag, payload = stack.pop()
         if tag == "EMIT":
