@@ -150,21 +150,26 @@ function applyAstFix({ source, filePath, dryRun }, tsMod) {
 }
 
 export async function loadTypeScript() {
-  try {
-    const loaded = await import("typescript");
-    return loaded.default ?? loaded;
-  } catch {
-    if (!process.env.APPDATA) {
-      return null;
-    }
+  const local = await importCompatibleTypeScript("typescript");
+  if (local || !process.env.APPDATA) {
+    return local;
   }
+  const globalTsPath = path.join(process.env.APPDATA, "npm", "node_modules", "typescript", "lib", "typescript.js");
+  return importCompatibleTypeScript(pathToFileURL(globalTsPath).href);
+}
+
+async function importCompatibleTypeScript(specifier) {
   try {
-    const globalTsPath = path.join(process.env.APPDATA, "npm", "node_modules", "typescript", "lib", "typescript.js");
-    const loaded = await import(pathToFileURL(globalTsPath).href);
-    return loaded.default ?? loaded;
+    const loaded = await import(specifier);
+    const mod = loaded.default ?? loaded;
+    return isCompatibleTypeScript(mod) ? mod : null;
   } catch {
     return null;
   }
+}
+
+export function isCompatibleTypeScript(mod) {
+  return Boolean(mod) && typeof mod.createSourceFile === "function" && typeof mod.forEachChild === "function" && mod.SyntaxKind !== undefined;
 }
 
 export function buildAstFileOutline(source, filePath, tsMod) {

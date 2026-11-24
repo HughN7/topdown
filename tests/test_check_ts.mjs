@@ -8,6 +8,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const checkerPath = path.join(rootDir, "enforcement", "check_ts.mjs");
 
+test("isCompatibleTypeScript rejects modules without the classic JS API", async () => {
+  const { isCompatibleTypeScript } = await import("../enforcement/check_ts.mjs");
+  assert.equal(isCompatibleTypeScript(null), false);
+  assert.equal(isCompatibleTypeScript({}), false);
+  assert.equal(isCompatibleTypeScript({ createSourceFile: () => null }), false);
+  const stub = { createSourceFile: () => null, forEachChild: () => null, SyntaxKind: {} };
+  assert.equal(isCompatibleTypeScript(stub), true);
+});
+
 test("clean topdown TS module passes", async () => {
   const { checkSource } = await import("../enforcement/check_ts.mjs");
   const source = [
