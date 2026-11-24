@@ -18,6 +18,8 @@ ENFORCEMENT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ENFORCEMENT_DIR.parent
 TS_EXTENSIONS = frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"})
 ENGINE_EXTENSIONS = frozenset({".swift", ".go"})
+OUTLINE_SCRIPTS = frozenset({"check_python.py", "check_ts.mjs"})
+MAX_OUTLINE_LINES = 25
 
 
 def main() -> int:
@@ -40,11 +42,17 @@ def main() -> int:
     )
     if proc.returncode == 0:
         return 0
-    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    output_parts = [part.strip() for part in (proc.stdout, proc.stderr) if part and part.strip()]
+    output = "\n".join(output_parts)
     if proc.returncode != 1:
         print(f"Topdown checker skipped ({target_path}): {output}", file=sys.stderr)
         return 0
-    print(f"Topdown violations in {target_path}:\n{output}", file=sys.stderr)
+    guidance = f"Topdown violations in {target_path}:\n{output}"
+    if ("CANON-01" in output or "LLM-08" in output) and supports_outline(command):
+        outline = fetch_module_outline(command, env)
+        if outline:
+            guidance = f"{guidance}\nModule outline:\n{outline}"
+    print(guidance, file=sys.stderr)
     return 2
 
 
@@ -98,6 +106,42 @@ def build_subprocess_env() -> dict[str, str]:
     repo_str = str(REPO_ROOT)
     env["PYTHONPATH"] = f"{repo_str}{os.pathsep}{existing}" if existing else repo_str
     return env
+
+
+def supports_outline(command: tuple[str, ...]) -> bool:
+    if len(command) < 2:
+        return False
+    checker_tokens = command[:-1]
+    return any(
+        Path(token).name in OUTLINE_SCRIPTS or token == "engine.cli"
+        for token in checker_tokens
+    )
+
+
+def fetch_module_outline(command: tuple[str, ...], env: dict[str, str]) -> str:
+    if len(command) < 2:
+        return ""
+    outline_cmd = (*command[:-1], "--outline", command[-1])
+    try:
+        proc = subprocess.run(
+            outline_cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    stdout_text = proc.stdout or ""
+    if proc.returncode != 0 or not stdout_text.strip():
+        return ""
+    lines = stdout_text.rstrip("\r\n").splitlines()
+    if len(lines) > MAX_OUTLINE_LINES:
+        lines = [*lines[:MAX_OUTLINE_LINES], "... (truncated)"]
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
