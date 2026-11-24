@@ -332,6 +332,305 @@ class TestCheckRust(unittest.TestCase):
         self.assertEqual(check_rust.check_source(stacked_fn, "stacked.rs"), [])
         self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(no_adjacent_leak, "leak.rs")])
 
+    def test_same_line_close_and_open_fn_no_false_canon03_or_canon05(self) -> None:
+        import check_rust
+
+        shared_fns = (
+            "pub fn first() -> bool {\n"
+            "    let is_loading = true;\n"
+            "    is_loading\n"
+            "} pub fn second() -> bool {\n"
+            "    let is_error = false;\n"
+            "    is_error\n"
+            "}\n"
+        )
+        shared_cfg_test = (
+            "pub fn prod() -> bool {\n"
+            "    true\n"
+            "} #[cfg(test)] mod tests {\n"
+            "    #[test]\n"
+            "    fn works() {\n"
+            "        let val = Some(1).unwrap();\n"
+            "        assert_eq!(val, 1);\n"
+            "    }\n"
+            "}\n"
+        )
+        ignore_bleed_canon05 = (
+            '// topdown-ignore(CANON-05, reason="only first")\n'
+            "pub fn first() -> bool {\n"
+            "    true\n"
+            "} pub fn second(a: bool, b: bool, c: bool) -> bool {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            if c {\n"
+            "                return true;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    false\n"
+            "}\n"
+        )
+        ignore_bleed_canon03 = (
+            '// topdown-ignore(CANON-03, reason="only first")\n'
+            "pub fn first() -> bool {\n"
+            "    true\n"
+            "} pub fn second() -> bool {\n"
+            "    let is_loading = true;\n"
+            "    let is_error = false;\n"
+            "    is_loading || is_error\n"
+            "}\n"
+        )
+        self.assertEqual(check_rust.check_source(shared_fns, "shared_fns.rs"), [])
+        self.assertEqual(check_rust.check_source(shared_cfg_test, "shared_cfg.rs"), [])
+        self.assertEqual(
+            [v.rule for v in check_rust.check_source(ignore_bleed_canon05, "bleed05.rs")],
+            ["CANON-05"],
+        )
+        self.assertEqual(
+            [v.rule for v in check_rust.check_source(ignore_bleed_canon03, "bleed03.rs")],
+            ["CANON-03"],
+        )
+
+    def test_multiline_typed_let_flushes_into_scope_canon03(self) -> None:
+        import check_rust
+
+        multiline_let = (
+            "pub fn fetch_state(opt: Option<i64>) -> bool {\n"
+            "    let is_loading: bool = compute_flag(\n"
+            "        opt,\n"
+            "        true,\n"
+            "    );\n"
+            "    let is_error: bool = false;\n"
+            "    is_loading || is_error\n"
+            "}\n"
+        )
+        multiline_impl_params = (
+            "pub struct Service;\n"
+            "impl Service {\n"
+            "    pub fn check_a(\n"
+            "        &self,\n"
+            "        is_loading: bool,\n"
+            "    ) -> bool {\n"
+            "        is_loading\n"
+            "    }\n"
+            "    pub fn check_b(\n"
+            "        &self,\n"
+            "        is_error: bool,\n"
+            "    ) -> bool {\n"
+            "        is_error\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(multiline_let, "mlet.rs")])
+        self.assertEqual(check_rust.check_source(multiline_impl_params, "impl.rs"), [])
+
+    def test_tail_expression_resets_pending_start(self) -> None:
+        import check_rust
+
+        tail_leak = (
+            "pub fn first(x: i64) -> i64 {\n"
+            '    x + 1 // topdown-ignore(CANON-03, reason="x")\n'
+            "}\n"
+            "pub fn second() -> bool {\n"
+            "    let is_loading = true;\n"
+            "    let is_error = false;\n"
+            "    is_loading || is_error\n"
+            "}\n"
+        )
+        top_stmt_leak = (
+            "const LIMIT: i64 =\n"
+            '    1; // topdown-ignore(CANON-03, reason="const")\n'
+            "pub struct FlagBag {\n"
+            "    pub is_loading: bool,\n"
+            "    pub is_error: bool,\n"
+            "}\n"
+        )
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(tail_leak, "tail.rs")])
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(top_stmt_leak, "topstmt.rs")])
+
+    def test_multiline_control_header_canon03_and_canon05(self) -> None:
+        import check_rust
+
+        multiline_if_deep = (
+            "pub fn deep_if(cond_a: bool, cond_b: bool, c: bool, d: bool) -> i64 {\n"
+            "    if cond_a\n"
+            "        && cond_b\n"
+            "    {\n"
+            "        if c {\n"
+            "            if d {\n"
+            "                return 1;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        multiline_if_state = (
+            "pub fn state_if(cond_a: bool, cond_b: bool) -> bool {\n"
+            "    let is_loading = true;\n"
+            "    if cond_a\n"
+            "        && cond_b\n"
+            "    {\n"
+            "        let is_error = true;\n"
+            "        return is_error;\n"
+            "    }\n"
+            "    is_loading\n"
+            "}\n"
+        )
+        multiline_if_let_struct_deep = (
+            "pub fn deep_let_struct(x: Foo, c: bool, d: bool) -> i64 {\n"
+            "    if let Foo {\n"
+            "        bar\n"
+            "    } = x {\n"
+            "        if c {\n"
+            "            if d {\n"
+            "                return 1;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        multiline_if_let_struct_state = (
+            "pub fn state_let_struct(x: Foo) -> bool {\n"
+            "    let is_loading = true;\n"
+            "    if let Foo {\n"
+            "        bar\n"
+            "    } = x {\n"
+            "        let is_error = true;\n"
+            "        return is_error;\n"
+            "    }\n"
+            "    is_loading\n"
+            "}\n"
+        )
+        multiline_let_else_flat = (
+            "pub fn flat_let_else(opt: Option<i64>, a: bool, b: bool) -> i64 {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            let Some(v) = opt else\n"
+            "            { return 0; };\n"
+            "            return v;\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        non_rust_keywords = (
+            "pub fn non_rust_ctrl(a: bool, b: bool) -> i64 {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            switch {\n"
+            "                try {\n"
+            "                    catch {\n"
+            "                        return 1;\n"
+            "                    }\n"
+            "                }\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        other_multiline_controls = (
+            "pub fn loop_while_for_match(items: &[i64], a: bool, b: bool) -> i64 {\n"
+            "    for item\n"
+            "        in items\n"
+            "    {\n"
+            "        while a\n"
+            "            && b\n"
+            "        {\n"
+            "            match item\n"
+            "            {\n"
+            "                0 => return 1,\n"
+            "                _ => {}\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        else_if_and_loop_state = (
+            "pub fn else_if_loop(cond: bool) -> bool {\n"
+            "    let is_loading = true;\n"
+            "    if cond {\n"
+            "        return false;\n"
+            "    } else if !cond\n"
+            "        && true\n"
+            "    {\n"
+            "        loop\n"
+            "        {\n"
+            "            let is_error = true;\n"
+            "            return is_error;\n"
+            "        }\n"
+            "    }\n"
+            "    is_loading\n"
+            "}\n"
+        )
+        self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(multiline_if_deep, "mif05.rs")])
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(multiline_if_state, "mif03.rs")])
+        self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(multiline_if_let_struct_deep, "mlet05.rs")])
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(multiline_if_let_struct_state, "mlet03.rs")])
+        self.assertEqual(check_rust.check_source(multiline_let_else_flat, "let_else.rs"), [])
+        self.assertEqual(check_rust.check_source(non_rust_keywords, "nonrust.rs"), [])
+        self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(other_multiline_controls, "other_ctrl.rs")])
+        self.assertIn("CANON-03", [v.rule for v in check_rust.check_source(else_if_and_loop_state, "else_loop.rs")])
+
+    def test_multiline_rust_attribute_header_walk(self) -> None:
+        import check_rust
+
+        suppressed_fn = (
+            '// topdown-ignore(CANON-05, reason="legacy nesting")\n'
+            "#[cfg_attr(\n"
+            '    all(feature = "a]b", feature = "c(d"), // trailing ] ) }\n'
+            "    inline,\n"
+            ")]\n"
+            "pub fn wrapped(a: bool, b: bool, c: bool) -> i64 {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            if c {\n"
+            "                return 1;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        suppressed_struct = (
+            '// topdown-ignore(CANON-03, reason="ffi layout")\n'
+            "#[derive(\n"
+            "    Debug,\n"
+            "    Clone,\n"
+            ")]\n"
+            "pub struct FfiFlags {\n"
+            "    pub is_loading: bool,\n"
+            "    pub is_error: bool,\n"
+            "}\n"
+        )
+        inner_attr_blocks = (
+            '// topdown-ignore(CANON-05, reason="crate attr only")\n'
+            "#![allow(\n"
+            "    dead_code\n"
+            ")]\n"
+            "pub fn unchecked(a: bool, b: bool, c: bool) -> i64 {\n"
+            "    if a {\n"
+            "        if b {\n"
+            "            if c {\n"
+            "                return 1;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        self.assertEqual(check_rust.check_source(suppressed_fn, "attr_fn.rs"), [])
+        self.assertEqual(check_rust.check_source(suppressed_struct, "attr_struct.rs"), [])
+        self.assertIn("CANON-05", [v.rule for v in check_rust.check_source(inner_attr_blocks, "inner_attr.rs")])
+        lines = suppressed_fn.splitlines()
+        collected = check_rust.collect_contiguous_header_lines(
+            lines, 6, prev_end_line=0, comment_lines={1}
+        )
+        self.assertEqual(collected, {1, 2, 3, 4, 5})
+
 
 if __name__ == "__main__":
     unittest.main()
