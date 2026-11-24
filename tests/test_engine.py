@@ -303,6 +303,884 @@ class TestUniversalEngine(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertIn("[L0] process_payout_batch (L37-L55, 19L) -> format_cents_usd, settle_eligible_payouts", proc.stdout)
 
+    def test_block_comment_topdown_ignore_does_not_trigger_canon08(self) -> None:
+        from engine.analyzer import analyze_source
+
+        ts_jsdoc = (
+            "/**\n"
+            " * Documents topdown-ignore behavior without being a directive.\n"
+            " */\n"
+            "export function renderNote(text: string): string {\n"
+            "  return text.trim();\n"
+            "}\n"
+        )
+        rust_block = (
+            "/* mentions topdown-ignore in a block comment */\n"
+            "pub fn clean_note(raw_text: &str) -> &str {\n"
+            "    raw_text.trim()\n"
+            "}\n"
+        )
+        swift_multiline = (
+            "/* mentions topdown-ignore in multiline comment */\n"
+            "func cleanNote(rawText: String) -> String {\n"
+            "    return rawText\n"
+            "}\n"
+        )
+        self.assertEqual(analyze_source(ts_jsdoc, "jsdoc.ts"), [])
+        self.assertEqual(analyze_source(rust_block, "block.rs"), [])
+        self.assertEqual(analyze_source(swift_multiline, "multi.swift"), [])
+
+    def test_ts_top_level_const_arrow_included_and_inline_callbacks_allowed(self) -> None:
+        from engine.analyzer import analyze_source, outline_source
+
+        arrows_out_of_order = (
+            "// [L3] Leaf defined above caller\n"
+            "const formatScore = (score: number): string => {\n"
+            "  return `${score}pts`;\n"
+            "};\n\n"
+            "// [L0] Orchestrator\n"
+            "export const\n"
+            "  renderScore = (score: number): string => {\n"
+            "    return formatScore(score);\n"
+            "  };\n"
+        )
+        viols = analyze_source(arrows_out_of_order, "arrows.ts")
+        order_viols = [v for v in viols if v.rule == "CANON-01" and "defined above it" in v.message]
+        self.assertEqual(len(order_viols), 1)
+        self.assertEqual(order_viols[0].line, 8)
+
+        outline = outline_source(arrows_out_of_order, "arrows.ts")
+        self.assertEqual([row["name"] for row in outline], ["formatScore", "renderScore"])
+        self.assertEqual(outline[1]["start_line"], 8)
+        self.assertEqual(outline[1]["declared_tier"], "L0")
+        self.assertEqual(outline[1]["callees"], ["formatScore"])
+        self.assertEqual(outline[0]["callers"], ["renderScore"])
+
+        inline_callback_clean = (
+            "export const normalizeNames = (names: string[]): string[] => {\n"
+            "  return names.map((entry) => {\n"
+            "    return entry.trim().toLowerCase();\n"
+            "  });\n"
+            "};\n"
+        )
+        self.assertEqual(analyze_source(inline_callback_clean, "inline.ts"), [])
+
+        js_arrow_clean = (
+            "// [L0] Entry\n"
+            "export const runTask = (items) => {\n"
+            "  return items.map((val) => val + 1);\n"
+            "};\n"
+        )
+        self.assertEqual(analyze_source(js_arrow_clean, "clean.mjs"), [])
+        self.assertEqual([row["name"] for row in outline_source(js_arrow_clean, "clean.mjs")], ["runTask"])
+
+    def test_python_overload_excluded_and_headers_absorbed(self) -> None:
+        from engine.analyzer import analyze_source, outline_source
+
+        overloaded = (
+            "import typing\n"
+            "from typing import overload\n\n"
+            "# [L0] Orchestrator\n"
+            "def run_pipeline(raw_value: str) -> str:\n"
+            "    return parse_value(raw_value)\n\n"
+            "# [L3] Leaf parser\n"
+            '# topdown-ignore(CANON-05, reason="legacy overloaded branch")\n'
+            "@overload\n"
+            "def parse_value(val: int, flag_a: bool, flag_b: bool, flag_c: bool) -> int: ...\n"
+            "@typing.overload\n"
+            "def parse_value(val: str, flag_a: bool, flag_b: bool, flag_c: bool) -> str: ...\n"
+            "def parse_value(val: int | str, flag_a: bool = False, flag_b: bool = False, flag_c: bool = False) -> int | str:\n"
+            "    if flag_a:\n"
+            "        if flag_b:\n"
+            "            if flag_c:\n"
+            "                return val\n"
+            "    return val\n\n"
+            "class Formatter:\n"
+            '    # topdown-ignore(CANON-05, reason="legacy method overload")\n'
+            "    @overload\n"
+            "    def format_cell(self, raw: int, f1: bool, f2: bool, f3: bool) -> str: ...\n"
+            "    @typing.overload\n"
+            "    def format_cell(self, raw: str, f1: bool, f2: bool, f3: bool) -> str: ...\n"
+            "    def format_cell(self, raw: int | str, f1: bool = False, f2: bool = False, f3: bool = False) -> str:\n"
+            "        if f1:\n"
+            "            if f2:\n"
+            "                if f3:\n"
+            "                    return str(raw)\n"
+            "        return str(raw)\n"
+        )
+        self.assertEqual(analyze_source(overloaded, "ov.py"), [])
+        outline = outline_source(overloaded, "ov.py")
+        self.assertEqual([entry["name"] for entry in outline], ["run_pipeline", "parse_value"])
+        self.assertEqual(outline[1]["declared_tier"], "L3")
+
+        conflicting_tags = (
+            "from typing import overload\n\n"
+            "# [L3] Stub header tag\n"
+            "@overload\n"
+            "def parse_value(val: int) -> int: ...\n"
+            "# [L2] Conflicting impl tag\n"
+            "def parse_value(val: int | str) -> int | str:\n"
+            "    return val\n"
+        )
+        self.assertIn("CANON-01", [v.rule for v in analyze_source(conflicting_tags, "ov_dup.py")])
+
+        non_contiguous = (
+            "from typing import overload\n\n"
+            "# [L3] Interrupted header\n"
+            "@overload\n"
+            "def parse_value(val: int) -> int: ...\n\n"
+            "SENTINEL = 1\n\n"
+            "def parse_value(val: int | str) -> int | str:\n"
+            "    return val\n"
+        )
+        nc_outline = outline_source(non_contiguous, "ov_nc.py")
+        self.assertIsNone(nc_outline[0]["declared_tier"])
+
+        decorator_calls_excluded = (
+            "def make_decorator(config: dict[str, str]):\n"
+            "    return lambda fn: fn\n\n"
+            "def build_config() -> dict[str, str]:\n"
+            '    return {"mode": "strict"}\n\n'
+            "def make_type() -> type[str]:\n"
+            "    return str\n\n"
+            "# [L0] Orchestrator\n"
+            "@make_decorator(build_config())\n"
+            "def run_handler(\n"
+            "    raw_text: make_type(),\n"
+            "    suffix: str = default_suffix(),\n"
+            "    *,\n"
+            "    prefix: str = default_prefix(),\n"
+            ") -> make_type():\n"
+            "    return prefix + finish_task(raw_text) + suffix\n\n"
+            "# [L3] Leaf\n"
+            "@make_decorator(build_config())\n"
+            "def finish_task(raw_text: make_type()) -> make_type():\n"
+            "    return raw_text.strip()\n\n"
+            "# [L3] Default suffix\n"
+            "def default_suffix() -> str:\n"
+            '    return "!"\n\n'
+            "# [L3] Default prefix\n"
+            "def default_prefix() -> str:\n"
+            '    return ">"\n'
+        )
+        self.assertEqual(analyze_source(decorator_calls_excluded, "dec_calls.py"), [])
+        dec_outline = outline_source(decorator_calls_excluded, "dec_calls.py")
+        handler_row = next(row for row in dec_outline if row["name"] == "run_handler")
+        finish_row = next(row for row in dec_outline if row["name"] == "finish_task")
+        self.assertEqual(handler_row["callees"], ["default_prefix", "default_suffix", "finish_task"])
+        self.assertEqual(finish_row["callees"], [])
+
+    def test_multiline_attribute_and_same_line_close_guard(self) -> None:
+        from engine.analyzer import analyze_source, collect_contiguous_header_lines
+
+        ts_between_decorators = (
+            "export class Handler {\n"
+            "  @autobind\n"
+            '  // topdown-ignore(CANON-05, reason="legacy nesting")\n'
+            "  @Decorator({\n"
+            '    path: "a)b}c]", // trailing ] ) }\n'
+            "    items: [1, 2],\n"
+            "  })\n"
+            "  public async handle(flagA: boolean, flagB: boolean, flagC: boolean): Promise<number> {\n"
+            "    if (flagA) {\n"
+            "      if (flagB) {\n"
+            "        if (flagC) {\n"
+            "          return 1;\n"
+            "        }\n"
+            "      }\n"
+            "    }\n"
+            "    return 0;\n"
+            "  }\n"
+            "}\n"
+        )
+        rust_line1_attr = (
+            '#[inline] // topdown-ignore(CANON-05, reason="inline attr at line 1")\n'
+            "pub fn check(flag_a: bool, flag_b: bool, flag_c: bool) -> i64 {\n"
+            "    if flag_a { if flag_b { if flag_c { return 1; } } }\n"
+            "    0\n"
+            "}\n"
+        )
+        rust_post_prev_end = (
+            "pub fn first() -> i64 {\n"
+            "    1\n"
+            "}\n"
+            "#[cfg_attr(\n"
+            "    all(),\n"
+            '    inline // topdown-ignore(CANON-05, reason="post prev_end attr")\n'
+            ")]\n"
+            "pub fn second(flag_a: bool, flag_b: bool, flag_c: bool) -> i64 {\n"
+            "    if flag_a { if flag_b { if flag_c { return 1; } } }\n"
+            "    0\n"
+            "}\n"
+        )
+        same_line_close_no_leak = (
+            '// topdown-ignore(CANON-05, reason="only first")\n'
+            "export function first(): number {\n"
+            "  return 1;\n"
+            "} export function second(flagA: boolean, flagB: boolean, flagC: boolean): number {\n"
+            "  if (flagA) { if (flagB) { if (flagC) { return 1; } } }\n"
+            "  return 0;\n"
+            "}\n"
+        )
+        self.assertEqual(analyze_source(ts_between_decorators, "dec.ts"), [])
+        self.assertEqual(analyze_source(rust_line1_attr, "line1.rs"), [])
+        self.assertEqual(analyze_source(rust_post_prev_end, "post_prev.rs"), [])
+        self.assertEqual(
+            collect_contiguous_header_lines(
+                rust_post_prev_end.splitlines(), 8, prev_end_line=3, comment_lines=set(), lang_name="rust"
+            ),
+            {4, 5, 6, 7},
+        )
+        leak_viols = analyze_source(same_line_close_no_leak, "same_line_leak.ts")
+        self.assertEqual([(v.line, v.rule) for v in leak_viols], [(4, "CANON-05")])
+
+    def test_tier_tags_no_double_diagnostic_no_l4_and_l0_adapter_outline_json(self) -> None:
+        from engine.analyzer import analyze_source, outline_source
+
+        l0_adapter_and_gap = {
+            "ok.py": (
+                "# [L0] Adapter Entrypoint\n"
+                "def run_adapter(raw_text: str) -> str:\n"
+                "    return write_log(raw_text)\n\n"
+                "# [L0] Adapter Leaf\n"
+                "def write_log(raw_text: str) -> str:\n"
+                "    return raw_text.strip()\n\n"
+                "# [L0] Gap Entrypoint\n"
+                "def run_gap(raw_text: str) -> str:\n"
+                "    return normalize_text(raw_text)\n\n"
+                "# [L3] Leaf\n"
+                "def normalize_text(raw_text: str) -> str:\n"
+                "    return raw_text.lower()\n"
+            ),
+            "ok.ts": (
+                "// [L0] Adapter Entrypoint\n"
+                "export function runAdapter(rawText: string): string {\n"
+                "  return writeLog(rawText);\n"
+                "}\n"
+                "// [L0] Adapter Leaf\n"
+                "function writeLog(rawText: string): string {\n"
+                "  return rawText.trim();\n"
+                "}\n"
+                "// [L0] Gap Entrypoint\n"
+                "export function runGap(rawText: string): string {\n"
+                "  return normalizeText(rawText);\n"
+                "}\n"
+                "// [L3] Leaf\n"
+                "function normalizeText(rawText: string): string {\n"
+                "  return rawText.toLowerCase();\n"
+                "}\n"
+            ),
+            "ok.rs": (
+                "// [L0] Adapter Entrypoint\n"
+                "pub fn run_adapter(raw_text: &str) -> &str {\n"
+                "    write_log(raw_text)\n"
+                "}\n"
+                "// [L0] Adapter Leaf\n"
+                "fn write_log(raw_text: &str) -> &str {\n"
+                "    raw_text.trim()\n"
+                "}\n"
+            ),
+            "ok.swift": (
+                "// [L0] Adapter Entrypoint\n"
+                "func runAdapter(rawText: String) -> String {\n"
+                "    return writeLog(rawText: rawText)\n"
+                "}\n"
+                "// [L0] Adapter Leaf\n"
+                "func writeLog(rawText: String) -> String {\n"
+                "    return rawText\n"
+                "}\n"
+            ),
+            "ok.go": (
+                "package adapter\n\n"
+                "// [L0] Adapter Entrypoint\n"
+                "func RunAdapter(rawText string) string {\n"
+                "    return writeLog(rawText)\n"
+                "}\n"
+                "// [L0] Adapter Leaf\n"
+                "func writeLog(rawText string) string {\n"
+                "    return rawText\n"
+                "}\n"
+            ),
+        }
+        for filename, src in l0_adapter_and_gap.items():
+            self.assertEqual(analyze_source(src, filename), [], msg=filename)
+
+        gap_compressed = (
+            "# [L1] Workflow\n"
+            "def step_one(count: int) -> int:\n"
+            "    return step_two(count)\n\n"
+            "def step_two(count: int) -> int:\n"
+            "    return step_three(count)\n\n"
+            "# [L2] Impossible tier after untagged intermediate\n"
+            "def step_three(count: int) -> int:\n"
+            "    return count + 1\n"
+        )
+        self.assertIn("CANON-01", [v.rule for v in analyze_source(gap_compressed, "gap.py")])
+
+        duplicate_tags = (
+            "// [L0] First\n"
+            "// [L1] Second\n"
+            "export function solo(count: number): number {\n"
+            "  return count;\n"
+            "}\n"
+        )
+        self.assertIn("CANON-01", [v.rule for v in analyze_source(duplicate_tags, "dup_tag.ts")])
+
+        l1_calling_l0 = (
+            "// [L1] Pure workflow\n"
+            "export function workflow(count: number): number {\n"
+            "  return badLeaf(count);\n"
+            "}\n"
+            "// [L0] Invalid L0 below L1\n"
+            "function badLeaf(count: number): number {\n"
+            "  return count + 1;\n"
+            "}\n"
+        )
+        single_diag = [v for v in analyze_source(l1_calling_l0, "inv.ts") if v.rule == "CANON-01"]
+        self.assertEqual(len(single_diag), 1)
+        self.assertEqual(single_diag[0].line, 6)
+
+        no_l4_chain = (
+            "// [L2] Start\n"
+            "pub fn mid_step(count: i64) -> i64 {\n"
+            "    sub_step(count)\n"
+            "}\n"
+            "// [L2] Mid\n"
+            "fn sub_step(count: i64) -> i64 {\n"
+            "    inner_leaf(count)\n"
+            "}\n"
+            "// [L2] End\n"
+            "fn inner_leaf(count: i64) -> i64 {\n"
+            "    count + 1\n"
+            "}\n"
+        )
+        no_l4_viols = [v for v in analyze_source(no_l4_chain, "nol4.rs") if v.rule == "CANON-01"]
+        self.assertTrue(no_l4_viols)
+        for viol in no_l4_viols:
+            self.assertNotIn("L4", viol.message)
+        leaf_msgs = [v.message for v in no_l4_viols if v.line == 10]
+        self.assertEqual(len(leaf_msgs), 1)
+        self.assertIn("mid_step", leaf_msgs[0])
+        self.assertIn("[L2]", leaf_msgs[0])
+
+        dup_names_py = (
+            "# [L0] Entrypoint\n"
+            "def run_job(amount_cents: int) -> int:\n"
+            "    return render_value(amount_cents)\n\n"
+            "# [L1] First variant\n"
+            "def render_value(amount_cents: int) -> int:\n"
+            "    return double_amount(amount_cents)\n\n"
+            "# [L3] Second variant\n"
+            "def render_value(amount_cents: int) -> int:\n"
+            "    return amount_cents + 1\n\n"
+            "# [L3] Leaf\n"
+            "def double_amount(amount_cents: int) -> int:\n"
+            "    return amount_cents * 2\n"
+        )
+        self.assertEqual(analyze_source(dup_names_py, "dup_names.py"), [])
+        dup_outline = outline_source(dup_names_py, "dup_names.py")
+        self.assertEqual(len(dup_outline), 4)
+        self.assertEqual(dup_outline[0]["callees"], ["render_value"])
+        self.assertEqual(dup_outline[1]["declared_tier"], "L1")
+        self.assertEqual(dup_outline[1]["callers"], ["run_job"])
+        self.assertEqual(dup_outline[1]["callees"], ["double_amount"])
+        self.assertEqual(dup_outline[2]["declared_tier"], "L3")
+        self.assertEqual(dup_outline[2]["callers"], ["run_job"])
+        self.assertEqual(dup_outline[2]["callees"], [])
+        self.assertEqual(dup_outline[3]["callers"], ["render_value"])
+
+        dup_bad_anc = (
+            "// [L2] First dup\n"
+            "func dupStep(count int) int {\n"
+            "    return badLeaf(count)\n"
+            "}\n"
+            "// [L0] Second dup\n"
+            "func dupStep(count int) int {\n"
+            "    return count\n"
+            "}\n"
+            "// [L2] Callee below [L2]\n"
+            "func badLeaf(count int) int {\n"
+            "    return count + 1\n"
+            "}\n"
+        )
+        bad_msgs = [v.message for v in analyze_source(dup_bad_anc, "dup_anc.go") if v.rule == "CANON-01"]
+        self.assertTrue(any("below 'dupStep' ([L2])" in msg for msg in bad_msgs), msg=bad_msgs)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sample_swift = Path(tmp_dir) / "sample.swift"
+            sample_swift.write_text(l0_adapter_and_gap["ok.swift"], encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-m", "engine.cli", "--outline", "--json", str(sample_swift)],
+                cwd=str(ROOT_DIR),
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload[0]["functions"][0]["declared_tier"], "L0")
+            self.assertEqual(payload[0]["functions"][0]["valid_tiers"], ["L0"])
+            self.assertEqual(payload[0]["functions"][1]["callers"], ["runAdapter"])
+            self.assertEqual(payload[0]["functions"][1]["valid_tiers"], ["L0", "L1", "L2", "L3"])
+
+    def test_engine_llm08_duplicate_leaves_and_operator_shorthand_preservation(self) -> None:
+        from engine.analyzer import analyze_source, check_duplicate_leaves, collect_top_functions
+        from engine.specs import spec_for_path
+        from tree_sitter_language_pack import get_parser
+
+        py_dups = (
+            "def normalize_alpha(raw_text: str, *, scale: int = 2) -> list[str]:\n"
+            '    """First doc."""\n'
+            "    cleaned = raw_text.strip()\n"
+            "    tokens = [part.lower() for part in cleaned.split(',') if part]\n"
+            "    try:\n"
+            "        ordered = sorted(tokens, key=lambda entry: (len(entry), entry))\n"
+            "    except ValueError as err:\n"
+            "        return [str(err)]\n"
+            "    return [f'{token}:{scale}' for token in ordered]\n\n"
+            "def normalize_beta(input_str: str, *, factor: int = 2) -> list[str]:\n"
+            '    """Different doc."""\n'
+            "    trimmed = input_str.strip()\n"
+            "    chunks = [chunk.lower() for chunk in trimmed.split(',') if chunk]\n"
+            "    try:\n"
+            "        ranked = sorted(chunks, key=lambda row: (len(row), row))\n"
+            "    except ValueError as exc:\n"
+            "        return [str(exc)]\n"
+            "    return [f'{word}:{factor}' for word in ranked]\n"
+        )
+        py_viols = [v for v in analyze_source(py_dups, "dups.py") if v.rule == "LLM-08"]
+        self.assertEqual(len(py_viols), 1)
+        self.assertEqual(py_viols[0].line, 11)
+        self.assertEqual(
+            py_viols[0].message,
+            "Function 'normalize_beta' duplicates leaf helper 'normalize_alpha' (line 1); reuse the existing helper instead of adding a duplicate.",
+        )
+
+        py_suppressed = py_dups.replace(
+            "def normalize_beta",
+            '# topdown-ignore(LLM-08, reason="distinct domain concept")\ndef normalize_beta',
+        )
+        self.assertEqual([v for v in analyze_source(py_suppressed, "supp.py") if v.rule == "LLM-08"], [])
+
+        ts_dups = (
+            "export function normalizeAlpha(rawText: string, rows: string[]): string[] {\n"
+            "  const cleaned = rawText.trim();\n"
+            "  const parts = cleaned.split(',');\n"
+            "  const mapped = parts.map((entry) => entry.toLowerCase());\n"
+            "  const [firstItem] = rows;\n"
+            "  const combined = [...mapped, firstItem];\n"
+            "  return combined.filter((token) => token.length > 0);\n"
+            "}\n\n"
+            "export const normalizeBeta = (inputStr: string, items: string[]): string[] => {\n"
+            "  const trimmed = inputStr.trim();\n"
+            "  const chunks = trimmed.split(',');\n"
+            "  const lowered = chunks.map((row) => row.toLowerCase());\n"
+            "  const [headEntry] = items;\n"
+            "  const merged = [...lowered, headEntry];\n"
+            "  return merged.filter((word) => word.length > 0);\n"
+            "};\n"
+        )
+        ts_viols = [v for v in analyze_source(ts_dups, "dups.ts") if v.rule == "LLM-08"]
+        self.assertEqual(len(ts_viols), 1)
+        self.assertEqual(ts_viols[0].line, 10)
+        self.assertEqual(
+            ts_viols[0].message,
+            "Function 'normalizeBeta' duplicates leaf helper 'normalizeAlpha' (line 1); reuse the existing helper instead of adding a duplicate.",
+        )
+        ts_suppressed = ts_dups.replace(
+            "export const normalizeBeta",
+            '// topdown-ignore(LLM-08, reason="distinct domain concept")\nexport const normalizeBeta',
+        )
+        self.assertEqual([v for v in analyze_source(ts_suppressed, "supp.ts") if v.rule == "LLM-08"], [])
+
+        rust_dups = (
+            "pub fn format_alpha(amount: i64) -> i64 {\n"
+            "    let abs_val = amount.abs();\n"
+            "    let step_one = abs_val + 10;\n"
+            "    let step_two = step_one * 2;\n"
+            "    let step_three = step_two - 5;\n"
+            "    let step_four = step_three / 3;\n"
+            "    step_four\n"
+            "}\n\n"
+            "pub fn format_beta(total: i64) -> i64 {\n"
+            "    let mag_val = total.abs();\n"
+            "    let part_one = mag_val + 10;\n"
+            "    let part_two = part_one * 2;\n"
+            "    let part_three = part_two - 5;\n"
+            "    let part_four = part_three / 3;\n"
+            "    part_four\n"
+            "}\n"
+        )
+        rust_viols = [v for v in analyze_source(rust_dups, "dups.rs") if v.rule == "LLM-08"]
+        self.assertEqual(len(rust_viols), 1)
+        self.assertEqual(rust_viols[0].line, 10)
+        rust_suppressed = rust_dups.replace(
+            "pub fn format_beta",
+            '// topdown-ignore(LLM-08, reason="separate domain")\npub fn format_beta',
+        )
+        self.assertEqual([v for v in analyze_source(rust_suppressed, "supp.rs") if v.rule == "LLM-08"], [])
+
+        js_single_param_arrow_dups = (
+            "const singleAlpha = rawText => {\n"
+            "  const stepOne = rawText.trim();\n"
+            "  const stepTwo = stepOne.toLowerCase();\n"
+            "  const stepThree = stepTwo.replace('-', '_');\n"
+            "  const stepFour = stepThree.slice(1);\n"
+            "  const stepFive = stepFour.toUpperCase();\n"
+            "  return stepFive;\n"
+            "};\n\n"
+            "const singleBeta = inputVal => {\n"
+            "  const partOne = inputVal.trim();\n"
+            "  const partTwo = partOne.toLowerCase();\n"
+            "  const partThree = partTwo.replace('-', '_');\n"
+            "  const partFour = partThree.slice(1);\n"
+            "  const partFive = partFour.toUpperCase();\n"
+            "  return partFive;\n"
+            "};\n"
+        )
+        self.assertEqual(len([v for v in analyze_source(js_single_param_arrow_dups, "arrow.js") if v.rule == "LLM-08"]), 1)
+
+        untagged_two_tier = (
+            "# [L0] Entry\n"
+            "def run_two_tier(first_text: str, second_text: str) -> tuple[str, str]:\n"
+            "    return clean_alpha(first_text), clean_beta(second_text)\n\n"
+            "def clean_alpha(raw_text: str) -> str:\n"
+            "    step_one = raw_text.strip()\n"
+            "    step_two = step_one.lower()\n"
+            "    step_three = step_two.replace(' ', '_')\n"
+            "    step_four = step_three.removeprefix('pre_')\n"
+            "    step_five = step_four.removesuffix('_post')\n"
+            "    return step_five\n\n"
+            "def clean_beta(other_text: str) -> str:\n"
+            "    step_one = other_text.strip()\n"
+            "    step_two = step_one.lower()\n"
+            "    step_three = step_two.replace(' ', '_')\n"
+            "    step_four = step_three.removeprefix('pre_')\n"
+            "    step_five = step_four.removesuffix('_post')\n"
+            "    return step_five\n"
+        )
+        self.assertEqual(len([v for v in analyze_source(untagged_two_tier, "two_tier.py") if v.rule == "LLM-08"]), 1)
+
+        comp_shadow_dups = (
+            "def map_alpha(part: str, raw_items: list[str]) -> list[str]:\n"
+            "    prefix = part.strip()\n"
+            "    cleaned = [part.upper() for part in raw_items if part]\n"
+            "    tagged = [f'{prefix}:{val}' for val in cleaned]\n"
+            "    ordered = sorted(tagged)\n"
+            "    tail = ordered[-1:]\n"
+            "    return ordered + tail\n\n"
+            "def map_beta(label: str, rows: list[str]) -> list[str]:\n"
+            "    head = label.strip()\n"
+            "    trimmed = [entry.upper() for entry in rows if entry]\n"
+            "    labeled = [f'{head}:{item_val}' for item_val in trimmed]\n"
+            "    ranked = sorted(labeled)\n"
+            "    last_part = ranked[-1:]\n"
+            "    return ranked + last_part\n"
+        )
+        self.assertEqual(len([v for v in analyze_source(comp_shadow_dups, "comp_shadow.py") if v.rule == "LLM-08"]), 1)
+
+        swift_loop_dups = (
+            "func loopAlpha(entry: Int, entries: [Int]) -> Int {\n"
+            "    var total = entry\n"
+            "    for entry in entries {\n"
+            "        total += entry\n"
+            "    }\n"
+            "    let stepOne = total * 2\n"
+            "    let stepTwo = stepOne + entry\n"
+            "    return stepTwo\n"
+            "}\n\n"
+            "func loopBeta(baseVal: Int, items: [Int]) -> Int {\n"
+            "    var acc = baseVal\n"
+            "    for rowVal in items {\n"
+            "        acc += rowVal\n"
+            "    }\n"
+            "    let partOne = acc * 2\n"
+            "    let partTwo = partOne + baseVal\n"
+            "    return partTwo\n"
+            "}\n"
+        )
+        self.assertEqual(len([v for v in analyze_source(swift_loop_dups, "loop.swift") if v.rule == "LLM-08"]), 1)
+
+        negative_cases = [
+            # a + b vs a - b
+            (
+                "ops.py",
+                "def add_fn(first: int, second: int) -> int:\n"
+                "    step_one = first + second\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "def sub_fn(first: int, second: int) -> int:\n"
+                "    step_one = first - second\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n",
+            ),
+            # arr[1:] vs arr[:1]
+            (
+                "slices.py",
+                "def slice_tail(arr: list[int]) -> list[int]:\n"
+                "    part = arr[1:]\n    step_two = len(part)\n    step_three = step_two + 1\n"
+                "    step_four = step_three * 2\n    step_five = step_four - 1\n    return part + [step_five]\n\n"
+                "def slice_head(arr: list[int]) -> list[int]:\n"
+                "    part = arr[:1]\n    step_two = len(part)\n    step_three = step_two + 1\n"
+                "    step_four = step_three * 2\n    step_five = step_four - 1\n    return part + [step_five]\n",
+            ),
+            # CACHE[idx] = val vs OTHER[idx] = val
+            (
+                "subscripts.py",
+                "def write_cache(idx: int, val: int) -> int:\n"
+                "    step_one = idx + 1\n    step_two = val * 2\n    CACHE[step_one] = step_two\n"
+                "    step_three = step_one + step_two\n    step_four = step_three * 3\n    return step_four\n\n"
+                "def write_other(idx: int, val: int) -> int:\n"
+                "    step_one = idx + 1\n    step_two = val * 2\n    OTHER[step_one] = step_two\n"
+                "    step_three = step_one + step_two\n    step_four = step_three * 3\n    return step_four\n",
+            ),
+            # Rust Some(val) vs Err(val)
+            (
+                "enum_pat.rs",
+                "pub fn match_some(box_a: Result<i64, i64>) -> i64 {\n"
+                "    if let Some(val) = box_a {\n"
+                "        let step_one = val + 1;\n"
+                "        let step_two = step_one * 2;\n"
+                "        let step_three = step_two - 3;\n"
+                "        let step_four = step_three + 4;\n"
+                "        return step_four;\n"
+                "    }\n"
+                "    0\n"
+                "}\n\n"
+                "pub fn match_err(box_b: Result<i64, i64>) -> i64 {\n"
+                "    if let Err(val) = box_b {\n"
+                "        let step_one = val + 1;\n"
+                "        let step_two = step_one * 2;\n"
+                "        let step_three = step_two - 3;\n"
+                "        let step_four = step_three + 4;\n"
+                "        return step_four;\n"
+                "    }\n"
+                "    0\n"
+                "}\n",
+            ),
+            # TS { name } vs { code } (both destructuring and object literal)
+            (
+                "shorthand.ts",
+                "function retName(rawText: string): { name: string } {\n"
+                "  const stepOne = rawText.trim();\n"
+                "  const stepTwo = stepOne.toLowerCase();\n"
+                "  const stepThree = stepTwo.replace(' ', '_');\n"
+                "  const stepFour = stepThree.slice(1);\n"
+                "  const name = stepFour.toUpperCase();\n"
+                "  return { name };\n"
+                "}\n"
+                "function retCode(rawText: string): { code: string } {\n"
+                "  const stepOne = rawText.trim();\n"
+                "  const stepTwo = stepOne.toLowerCase();\n"
+                "  const stepThree = stepTwo.replace(' ', '_');\n"
+                "  const stepFour = stepThree.slice(1);\n"
+                "  const code = stepFour.toUpperCase();\n"
+                "  return { code };\n"
+                "}\n",
+            ),
+            (
+                "destructure.ts",
+                "function bindName(payload: { name: string; code: string }): string {\n"
+                "  const { name } = payload;\n"
+                "  const stepTwo = name.trim();\n"
+                "  const stepThree = stepTwo.toLowerCase();\n"
+                "  const stepFour = stepThree.slice(0, 4);\n"
+                "  const stepFive = stepFour.toUpperCase();\n"
+                "  return stepFive;\n"
+                "}\n"
+                "function bindCode(payload: { name: string; code: string }): string {\n"
+                "  const { code } = payload;\n"
+                "  const stepTwo = code.trim();\n"
+                "  const stepThree = stepTwo.toLowerCase();\n"
+                "  const stepFour = stepThree.slice(0, 4);\n"
+                "  const stepFive = stepFour.toUpperCase();\n"
+                "  return stepFive;\n"
+                "}\n",
+            ),
+            # Rust Foo { bar } vs Foo { baz } and let Foo { bar } = x
+            (
+                "rust_shorthand.rs",
+                "pub fn init_bar(val: i64) -> Foo {\n"
+                "    let step_one = val + 1;\n"
+                "    let step_two = step_one * 2;\n"
+                "    let step_three = step_two - 3;\n"
+                "    let step_four = step_three + 4;\n"
+                "    let bar = step_four;\n"
+                "    Foo { bar }\n"
+                "}\n"
+                "pub fn init_baz(val: i64) -> Foo {\n"
+                "    let step_one = val + 1;\n"
+                "    let step_two = step_one * 2;\n"
+                "    let step_three = step_two - 3;\n"
+                "    let step_four = step_three + 4;\n"
+                "    let baz = step_four;\n"
+                "    Foo { baz }\n"
+                "}\n",
+            ),
+            (
+                "rust_pat_shorthand.rs",
+                "pub fn pat_bar(src: Foo) -> i64 {\n"
+                "    let Foo { bar } = src;\n"
+                "    let step_one = bar + 1;\n"
+                "    let step_two = step_one * 2;\n"
+                "    let step_three = step_two - 3;\n"
+                "    let step_four = step_three + 4;\n"
+                "    step_four\n"
+                "}\n"
+                "pub fn pat_baz(src: Foo) -> i64 {\n"
+                "    let Foo { baz } = src;\n"
+                "    let step_one = baz + 1;\n"
+                "    let step_two = step_one * 2;\n"
+                "    let step_three = step_two - 3;\n"
+                "    let step_four = step_three + 4;\n"
+                "    step_four\n"
+                "}\n",
+            ),
+            # K&R 5-line body
+            (
+                "kr_short.ts",
+                "function shortOne(\n"
+                "  rawText: string,\n"
+                "): string {\n"
+                "  // comment inside\n"
+                "  const stepOne = rawText.trim();\n"
+                "  const stepTwo = stepOne.toLowerCase();\n"
+                "  const stepThree = stepTwo.replace('-', '_');\n"
+                "  const stepFour = stepThree.toUpperCase();\n"
+                "  return stepFour;\n"
+                "}\n"
+                "function shortTwo(\n"
+                "  inputStr: string,\n"
+                "): string {\n"
+                "  // comment inside\n"
+                "  const partOne = inputStr.trim();\n"
+                "  const partTwo = partOne.toLowerCase();\n"
+                "  const partThree = partTwo.replace('-', '_');\n"
+                "  const partFour = partThree.toUpperCase();\n"
+                "  return partFour;\n"
+                "}\n",
+            ),
+            # leading docstring 5-line body
+            (
+                "doc_short.py",
+                "def short_one(raw_text: str) -> str:\n"
+                '    """Long\n    multi-line\n    docstring."""\n'
+                "    # comment\n\n"
+                "    step_one = raw_text.strip()\n"
+                "    step_two = step_one.lower()\n"
+                "    step_three = step_two.replace('-', '_')\n"
+                "    step_four = step_three.title()\n"
+                "    return step_four\n\n"
+                "def short_two(input_str: str) -> str:\n"
+                '    """Another\n    multi-line\n    docstring."""\n'
+                "    # comment\n\n"
+                "    part_one = input_str.strip()\n"
+                "    part_two = part_one.lower()\n"
+                "    part_three = part_two.replace('-', '_')\n"
+                "    part_four = part_three.title()\n"
+                "    return part_four\n",
+            ),
+            # [L0] leaf exempt
+            (
+                "l0_exempt.py",
+                "# [L0] Adapter A\n"
+                "def fetch_alpha(endpoint: str) -> str:\n"
+                "    step_one = endpoint.strip()\n"
+                "    step_two = step_one.lower()\n"
+                "    step_three = step_two.replace(' ', '')\n"
+                "    step_four = step_three.removeprefix('http://')\n"
+                "    step_five = step_four.removesuffix('/')\n"
+                "    return step_five\n\n"
+                "# [L0] Adapter B\n"
+                "def fetch_beta(target_url: str) -> str:\n"
+                "    step_one = target_url.strip()\n"
+                "    step_two = step_one.lower()\n"
+                "    step_three = step_two.replace(' ', '')\n"
+                "    step_four = step_three.removeprefix('http://')\n"
+                "    step_five = step_four.removesuffix('/')\n"
+                "    return step_five\n",
+            ),
+            # swapped params
+            (
+                "swapped.py",
+                "def sub_ab(first: int, second: int) -> int:\n"
+                "    val_a = first + 1\n    val_b = second + 2\n    val_c = val_a * 3\n"
+                "    val_d = val_b * 4\n    diff = val_c - val_d\n    return diff\n\n"
+                "def sub_ba(first: int, second: int) -> int:\n"
+                "    val_a = second + 1\n    val_b = first + 2\n    val_c = val_a * 3\n"
+                "    val_d = val_b * 4\n    diff = val_c - val_d\n    return diff\n",
+            ),
+            # different defaults (and = None / = undefined vs NO_DEFAULT, posonly/kwonly)
+            (
+                "defaults.py",
+                "def def_one(amount: int = 1) -> int:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "def def_two(amount: int = 2) -> int:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "def def_none(amount: int | None = None) -> int:\n"
+                "    step_one = amount or 0\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n\n"
+                "def no_def(amount: int | None) -> int:\n"
+                "    step_one = amount or 0\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n",
+            ),
+            (
+                "defaults.ts",
+                "function defUndef(amount = undefined): number {\n"
+                "  const stepOne = amount ?? 0;\n  const stepTwo = stepOne + 1;\n  const stepThree = stepTwo * 2;\n"
+                "  const stepFour = stepThree - 3;\n  const stepFive = stepFour + 4;\n  return stepFive;\n"
+                "}\n"
+                "function noDef(amount?: number): number {\n"
+                "  const stepOne = amount ?? 0;\n  const stepTwo = stepOne + 1;\n  const stepThree = stepTwo * 2;\n"
+                "  const stepFour = stepThree - 3;\n  const stepFive = stepFour + 4;\n  return stepFive;\n"
+                "}\n",
+            ),
+            (
+                "boundaries.py",
+                "def pos_only(first: int, /, second: int) -> int:\n"
+                "    step_one = first + second\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n\n"
+                "def normal_args(first: int, second: int) -> int:\n"
+                "    step_one = first + second\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n\n"
+                "def kw_only(first: int, *, second: int) -> int:\n"
+                "    step_one = first + second\n    step_two = step_one + 1\n    step_three = step_two * 2\n"
+                "    step_four = step_three - 3\n    step_five = step_four + 4\n    return step_five\n",
+            ),
+            # async vs sync
+            (
+                "async_vs_sync.py",
+                "def sync_fn(amount: int) -> int:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n\n"
+                "async def async_fn(amount: int) -> int:\n"
+                "    step_one = amount + 1\n    step_two = step_one + 2\n    step_three = step_two * 3\n"
+                "    step_four = step_three - 4\n    step_five = step_four + 5\n    return step_five\n",
+            ),
+        ]
+        for filename, src in negative_cases:
+            self.assertEqual(
+                [v for v in analyze_source(src, filename) if v.rule == "LLM-08"],
+                [],
+                msg=f"Unexpected LLM-08 on {filename}",
+            )
+
+        spec = spec_for_path("direct.py")
+        assert spec is not None
+        source_bytes = py_dups.encode("utf-8")
+        tree = get_parser(spec.name).parse(source_bytes)
+        top_fns = collect_top_functions(tree.root_node, source_bytes, spec)
+        direct_viols = check_duplicate_leaves(
+            top_fns,
+            source_bytes,
+            "direct.py",
+            spec=spec,
+            tier_state=({(fn.name, fn.start_line): set() for fn in top_fns}, {(fn.name, fn.start_line): None for fn in top_fns}),
+            comment_lines=set(),
+        )
+        self.assertEqual(len(direct_viols), 1)
+        self.assertEqual(direct_viols[0].rule, "LLM-08")
+
+
 
 if __name__ == "__main__":
     unittest.main()

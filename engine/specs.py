@@ -18,6 +18,10 @@ class LanguageSpec:
     import_nodes: frozenset[str]
     comment_nodes: frozenset[str]
     default_io_imports: tuple[str, ...]
+    supports_top_level_const_arrows: bool = False
+    param_nodes: frozenset[str] = frozenset()
+    shorthand_nodes: frozenset[str] = frozenset()
+    member_key_fields: frozenset[str] = frozenset()
 
 
 LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
@@ -32,6 +36,19 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         import_nodes=frozenset({"import_statement", "import_from_statement"}),
         comment_nodes=frozenset({"comment"}),
         default_io_imports=("httpx", "requests", "urllib", "sqlite3", "psycopg", "pathlib", "subprocess", "socket"),
+        supports_top_level_const_arrows=False,
+        param_nodes=frozenset({
+            "identifier",
+            "typed_parameter",
+            "default_parameter",
+            "typed_default_parameter",
+            "list_splat_pattern",
+            "dictionary_splat_pattern",
+            "positional_separator",
+            "keyword_separator",
+        }),
+        shorthand_nodes=frozenset(),
+        member_key_fields=frozenset({"attribute", "keyword_argument.name"}),
     ),
     LanguageSpec(
         name="typescript",
@@ -44,6 +61,18 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         import_nodes=frozenset({"import_statement", "export_statement"}),
         comment_nodes=frozenset({"comment"}),
         default_io_imports=("node:fs", "fs", "node:http", "node:https", "axios", "pg", "mysql2"),
+        supports_top_level_const_arrows=True,
+        param_nodes=frozenset({
+            "required_parameter",
+            "optional_parameter",
+            "identifier",
+            "assignment_pattern",
+            "rest_pattern",
+            "object_pattern",
+            "array_pattern",
+        }),
+        shorthand_nodes=frozenset({"shorthand_property_identifier", "shorthand_property_identifier_pattern"}),
+        member_key_fields=frozenset({"key", "property"}),
     ),
     LanguageSpec(
         name="tsx",
@@ -56,6 +85,18 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         import_nodes=frozenset({"import_statement", "export_statement"}),
         comment_nodes=frozenset({"comment"}),
         default_io_imports=("node:fs", "fs", "node:http", "node:https", "axios", "pg", "mysql2"),
+        supports_top_level_const_arrows=True,
+        param_nodes=frozenset({
+            "required_parameter",
+            "optional_parameter",
+            "identifier",
+            "assignment_pattern",
+            "rest_pattern",
+            "object_pattern",
+            "array_pattern",
+        }),
+        shorthand_nodes=frozenset({"shorthand_property_identifier", "shorthand_property_identifier_pattern"}),
+        member_key_fields=frozenset({"key", "property"}),
     ),
     LanguageSpec(
         name="javascript",
@@ -68,6 +109,16 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         import_nodes=frozenset({"import_statement", "export_statement"}),
         comment_nodes=frozenset({"comment"}),
         default_io_imports=("node:fs", "fs", "node:http", "node:https", "axios", "pg", "mysql2"),
+        supports_top_level_const_arrows=True,
+        param_nodes=frozenset({
+            "identifier",
+            "assignment_pattern",
+            "rest_pattern",
+            "object_pattern",
+            "array_pattern",
+        }),
+        shorthand_nodes=frozenset({"shorthand_property_identifier", "shorthand_property_identifier_pattern"}),
+        member_key_fields=frozenset({"key", "property"}),
     ),
     LanguageSpec(
         name="rust",
@@ -80,6 +131,10 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         import_nodes=frozenset({"use_declaration"}),
         comment_nodes=frozenset({"line_comment", "block_comment"}),
         default_io_imports=("std::fs", "std::net", "reqwest", "tokio::fs", "tokio::net", "sqlx"),
+        supports_top_level_const_arrows=False,
+        param_nodes=frozenset({"parameter", "self_parameter"}),
+        shorthand_nodes=frozenset({"shorthand_field_initializer", "shorthand_field_identifier"}),
+        member_key_fields=frozenset({"type", "field"}),
     ),
     LanguageSpec(
         name="swift",
@@ -92,6 +147,10 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         import_nodes=frozenset({"import_declaration"}),
         comment_nodes=frozenset({"comment", "multiline_comment"}),
         default_io_imports=("SwiftData", "CoreData", "Network", "Foundation.FileManager"),
+        supports_top_level_const_arrows=False,
+        param_nodes=frozenset({"parameter"}),
+        shorthand_nodes=frozenset(),
+        member_key_fields=frozenset({"suffix"}),
     ),
     LanguageSpec(
         name="go",
@@ -104,6 +163,10 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         import_nodes=frozenset({"import_spec"}),
         comment_nodes=frozenset({"comment"}),
         default_io_imports=("net/http", "os", "database/sql", "net"),
+        supports_top_level_const_arrows=False,
+        param_nodes=frozenset({"parameter_declaration", "variadic_parameter_declaration"}),
+        shorthand_nodes=frozenset(),
+        member_key_fields=frozenset({"field"}),
     ),
 )
 
